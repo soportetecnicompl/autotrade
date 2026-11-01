@@ -1054,7 +1054,7 @@ class BacktestStep(Step):
         ttk.Label(r, text="Historial a descargar", width=24).pack(side="left")
         self.days = tk.StringVar(value="90")
         ttk.Combobox(r, textvariable=self.days, values=["30", "60", "90", "180"], width=6).pack(side="left")
-        ttk.Label(r, text="días (más es mejor: se recomiendan 30+ señales)", style="Muted.TLabel").pack(side="left", padx=8)
+        ttk.Label(r, text="días (más es mejor, pero MT5 debe tener ese historial; si falla, prueba 30)", style="Muted.TLabel").pack(side="left", padx=8)
         r = ttk.Frame(self); r.pack(anchor="w", pady=3)
         ttk.Label(r, text="Saldo de referencia", width=24).pack(side="left")
         self.balance = tk.StringVar(value="1000")
@@ -1078,7 +1078,7 @@ class BacktestStep(Step):
         self.bar = ttk.Progressbar(r, mode="indeterminate", length=160)
         self.bar.pack(side="left", padx=8)
         self.st = self.status()
-        self.log = scrolledtext.ScrolledText(self, height=11, width=80, wrap="none", state="disabled", font=("Consolas" if IS_WINDOWS else "TkFixedFont", 9))
+        self.log = scrolledtext.ScrolledText(self, height=11, width=80, wrap="word", state="disabled", font=("Consolas" if IS_WINDOWS else "TkFixedFont", 9))
         self.log.pack(fill="both", expand=True)
 
     def channel_labels(self):
@@ -1119,6 +1119,16 @@ class BacktestStep(Step):
         self.app.bg(lambda: mt5_helper.probe(s.mt5_path, s.mt5_login, s.mt5_password, s.mt5_server, s.symbol), ok,
                     lambda e: self.set_status(self.st, f"✖ {e}", "bad"))
 
+    def clear_log(self):
+        self.log.config(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.config(state="disabled")
+
+    def last_log_line(self) -> str:
+        """Última línea con contenido del registro (el motivo concreto del fallo)."""
+        lines = [l.strip() for l in self.log.get("1.0", "end").splitlines() if l.strip()]
+        return lines[-1] if lines else ""
+
     def append(self, line: str):
         self.log.config(state="normal")
         self.log.insert("end", line)
@@ -1139,8 +1149,10 @@ class BacktestStep(Step):
             return messagebox.showwarning("Revisa los datos", "Días, saldo y hora del servidor deben ser números.")
         self.app.save()
         self.app.close_tg()          # libera la sesión de Telegram para el proceso hijo
+        self.clear_log()                          # cada intento empieza con el registro limpio
         self.btn.state(["disabled"]); self.bar.start(12)
-        self.set_status(self.st, "Descargando el historial y simulando… puede tardar unos minutos.")
+        self.set_status(self.st, "Descargando el historial y simulando… puede tardar unos minutos "
+                                 "(si MT5 tiene que descargar historia, hasta 1–2 minutos más).")
         out = str(data_dir() / f"history_c{ch.num}.json")
         steps = [["--backtest", "fetch", "--channel", str(ch.num), "--days", str(days), "--out", out],
                  ["--backtest", "run", "--history", out, "--prices", "mt5", "--symbol", s.symbol,
@@ -1166,7 +1178,9 @@ class BacktestStep(Step):
                 self.set_status(self.st, "✔ Listo. Pulsa «Abrir informe» para ver los resultados y las conclusiones.", "ok")
                 self.open_report()
             else:
-                self.set_status(self.st, "✖ Algo falló. Revisa el detalle de abajo (¿MT5 abierto con historia del oro? ¿hora del servidor?).", "bad")
+                why = self.last_log_line()
+                self.set_status(self.st, "✖ Algo falló. Mira el detalle de abajo: ahí se explica qué hacer."
+                                         + (f"\nÚltimo mensaje: {why[:220]}" if why else ""), "bad")
         self.app.bg(work, finished, lambda e: (self.bar.stop(), self.btn.state(["!disabled"]), self.set_status(self.st, f"✖ {e}", "bad")))
 
     def open_report(self):

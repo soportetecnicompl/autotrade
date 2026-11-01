@@ -330,6 +330,35 @@ class GuiTests(unittest.TestCase):
         b.chan.set("Canal B  (#9)")
         self.assertTrue(str(b.report_path()).endswith("report_c9.html"))
 
+    def test_failed_analysis_clears_the_log_and_shows_the_concrete_reason(self):
+        a = self.app
+        a.v["api_id"].set("12345678"); a.v["api_hash"].set("a" * 32); a.v["phone"].set("+50499998888")
+        a.settings.channels = [ChannelCfg(1, "@goldpro", "Gold Pro")]
+        a.show(self.BACKTEST)
+        b = a.steps[self.BACKTEST]
+        b.append("texto de un intento anterior\n")
+        calls = []
+
+        def fake_run_logged(cmd, outfile, emit, cwd=None):
+            calls.append(cmd)
+            emit("1950 mensajes guardados\n")
+            emit("MT5 no devolvió velas M1 de «XAUUSD».\nQué hacer: abre el gráfico M1 y pulsa Inicio\n")
+            return 1
+        real = gui.run_logged
+        gui.run_logged = fake_run_logged
+        try:
+            b.run()
+        finally:
+            gui.run_logged = real
+        log = b.log.get("1.0", "end")
+        self.assertNotIn("intento anterior", log)                      # cada intento empieza limpio
+        self.assertEqual(len(calls), 1)                                # el 1.º paso falló: no sigue con el 2.º
+        self.assertIn("1950 mensajes guardados", log)
+        banner = b.st.cget("text")
+        self.assertIn("Algo falló", banner)
+        self.assertIn("Último mensaje: Qué hacer: abre el gráfico M1 y pulsa Inicio", banner)
+        self.assertEqual(str(b.log.cget("wrap")), "word")              # el texto largo ya no se corta
+
     def test_buttons_define_readable_colors_for_every_state(self):
         """Regresión: texto de botones invisible. Cada estilo debe fijar texto Y fondo contrastados."""
         from tkinter import ttk

@@ -57,6 +57,7 @@ async def fetch(a) -> None:
 
 # ------------------------------------------------------------------- precios
 def load_mt5(symbol: str, t0: float, t1: float, base_h: float, us_dst: bool) -> Prices:
+    from autotrade.mt5_history import advice, fetch_m1, maxbars_warning
     from autotrade.mt5_import import import_mt5
     try:
         mt5 = import_mt5()          # solo Windows
@@ -64,24 +65,29 @@ def load_mt5(symbol: str, t0: float, t1: float, base_h: float, us_dst: bool) -> 
         raise SystemExit(f"No se pudo importar MetaTrader5 ({type(e).__name__}: {e}). Solo funciona en Windows.")
 
     if not mt5.initialize():
-        raise SystemExit(f"mt5.initialize falló: {mt5.last_error()}")
-    mt5.symbol_select(symbol, True)
-    off = make_offset_fn(base_h, us_dst)
-    s0, s1 = int(t0 + off(t0)) - 86400, int(t1 + off(t1)) + 2 * 86400
-    # MT5 interpreta los datetime como UTC y devuelve la hora del servidor tal cual.
-    rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1,
-                                 datetime.fromtimestamp(s0, timezone.utc),
-                                 datetime.fromtimestamp(s1, timezone.utc))
-    mt5.shutdown()
-    if rates is None or len(rates) == 0:
-        raise SystemExit("MT5 no devolvió velas M1. Abre el gráfico M1 del símbolo, sube "
-                         "'Max bars in chart' y desplázate atrás para descargar historia; "
-                         "o usa un CSV con --prices archivo.csv")
-    bars = [(int(r["time"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]))
-            for r in rates]
-    print(f"MT5: {len(bars)} velas M1 de {datetime.fromtimestamp(bars[0][0], timezone.utc):%Y-%m-%d} "
-          f"a {datetime.fromtimestamp(bars[-1][0], timezone.utc):%Y-%m-%d}")
-    return Prices(bars, off)
+        raise SystemExit(f"No se pudo conectar a MT5: {mt5.last_error()}. Abre MetaTrader 5 e inicia sesión.")
+    try:
+        mt5.symbol_select(symbol, True)
+        off = make_offset_fn(base_h, us_dst)
+        s0, s1 = int(t0 + off(t0)) - 86400, int(t1 + off(t1)) + 2 * 86400
+        days = (t1 - t0) / 86400 + 1
+        warn = maxbars_warning(mt5, days)
+        if warn:
+            print(warn, flush=True)
+        bars = fetch_m1(mt5, symbol, s0, s1, log=lambda m: print(m, flush=True))
+        err = mt5.last_error()
+    finally:
+        mt5.shutdown()
+    if not bars:
+        raise SystemExit(advice(symbol, err, int(round(days))))
+    prices = Prices(bars, off)
+    first, last = prices.utc(0), prices.utc(len(bars) - 1)
+    day = lambda ts: datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+    print(f"MT5: {len(bars):,} velas M1 de {day(first)} a {day(last)}", flush=True)
+    if first > t0 + 2 * 86400:
+        print(f"⚠ MT5 solo tiene velas M1 desde {day(first)}: las señales anteriores a esa fecha se omiten del análisis. "
+              "Para analizar más historia, descárgala en MT5 (gráfico M1 + tecla Inicio) y repite.", flush=True)
+    return prices
 
 
 # ------------------------------------------------------------------- run
