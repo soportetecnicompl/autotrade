@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from typing import List, Optional
 
 from .parser import Command, Signal
 from .planner import OrderPlan, Skip, apply_stops_level, plan_orders
+from .risk import seconds_into_day
 
 log = logging.getLogger("trader")
 
@@ -30,6 +32,13 @@ class Trader:
         self.si = None
         self.account_desc = ""
         self._init_kw: dict = {}
+        # protecciones y control: los asigna main.py (None = función desactivada)
+        self.control = None            # autotrade.control.Control   (pausa)
+        self.guard = None              # autotrade.risk.RiskGuard    (límite diario)
+        self.news = None               # autotrade.news.NewsFilter   (noticias)
+        self.outcome = ("", "")        # (estado, detalle) de la última señal, para la bandeja de señales
+        self._tp1_seen: set = set()
+        self._be_done: set = set()
         # notify(texto, nivel) la asigna main.py; por defecto no hace nada
         self.notify = lambda text, level="info": None
 
@@ -228,10 +237,20 @@ class Trader:
         num = ch.get("num", 1)
         who = f"[{ch['title']}] " if ch.get("title") else ""
         max_tps = ch.get("max_tps") or c["max_tps"]
+        self.outcome = ("", "")
+        if self._gate(num, who, msg_id):
+            return 0
         tick = m.symbol_info_tick(self.symbol)
         if tick is None:
+            self.outcome = ("error", "sin precio")
             log.error("Sin precio para %s", self.symbol)
             self.notify(f"❌ {who}Señal {msg_id} no operada: sin precio de {self.symbol}", "error")
+            return 0
+        max_spread = c.get("max_spread_usd") or 0
+        if max_spread and tick.ask - tick.bid > max_spread:
+            why = f"spread {tick.ask - tick.bid:.2f} USD > máximo {max_spread:g} USD"
+            self.outcome = ("ignorada", why)
+            self.notify(f"⚠️ {who}Señal {msg_id} ignorada: {why}", "warn")
             return 0
         try:
             plans = plan_orders(
@@ -248,6 +267,7 @@ class Trader:
                             f"broker: {'; '.join(sorted(set(adjustments)))}", "warn")
         except Skip as e:
             log.warning("Señal %s ignorada: %s", msg_id, e)
+            self.outcome = ("ignorada", str(e))
             self.notify(f"⚠️ {who}Señal {msg_id} ignorada: {e}", "warn")
             return 0
 
@@ -255,6 +275,7 @@ class Trader:
         if open_now + len(plans) > c["max_open_positions"]:
             log.warning("Señal %s ignorada: límite max_open_positions=%s (hay %s)",
                         msg_id, c["max_open_positions"], open_now)
+            self.outcome = ("ignorada", f"límite de posiciones abiertas ({open_now}/{c['max_open_positions']})")
             self.notify(f"⚠️ {who}Señal {msg_id} ignorada: ya hay {open_now} operaciones/pendientes "
                         f"(máximo {c['max_open_positions']})", "warn")
             return 0
@@ -300,7 +321,131 @@ class Trader:
         self.notify(f"{'✅' if sent == len(plans) else '⚠️'} {who}Señal {msg_id}: {plans[0].side} "
                     f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
                     f"SL {plans[0].sl} | TP {tps}", "info")
+        self.outcome = (("operada" if sent == len(plans) else "error" if sent == 0 else "parcial"),
+                        f"{sent}/{len(plans)} órdenes {plans[0].side} {plans[0].kind} | SL {plans[0].sl} | TP {tps}")
+        if sent and self.guard is not None:
+            self.guard.register_signal()
         return sent
+
+    # ------------------------------------------------------- protecciones y control
+    def today_stats(self) -> tuple:
+        """(saldo, ganancia realizada hoy por el bot, ganancia flotante de lo abierto del bot)."""
+        m = self.mt5
+        acc = m.account_info()
+        floating = sum(float(getattr(p, "profit", 0) or 0) + float(getattr(p, "swap", 0) or 0)
+                       for p in self.positions())
+        realized = 0.0
+        tick = m.symbol_info_tick(self.symbol)
+        if tick is not None:
+            tz = self.cfg.get("tz_offset_hours", 0.0)
+            day_start = tick.time - seconds_into_day(time.time(), tz)      # inicio del día local, en hora del servidor
+            try:
+                deals = m.history_deals_get(int(tick.time - 36 * 3600), int(tick.time + 3600)) or []
+            except Exception:  # noqa: BLE001 - sin historial no se corta el trading
+                deals = []
+            out_kinds = {m.DEAL_ENTRY_OUT, m.DEAL_ENTRY_INOUT, getattr(m, "DEAL_ENTRY_OUT_BY", 3)}
+            for d in deals:
+                if d.magic == self.magic and d.entry in out_kinds and d.time >= day_start:
+                    realized += float(d.profit) + float(d.swap) + float(d.commission) + float(getattr(d, "fee", 0) or 0)
+        return float(getattr(acc, "balance", 0) or 0), realized, floating
+
+    def risk_check(self):
+        bal, realized, floating = self.today_stats()
+        return self.guard.check(time.time(), bal, realized, floating)
+
+    def _on_trip(self, reason: str) -> None:
+        self.notify(f"🛑 Límite diario alcanzado: {reason}.\nNo se abrirán más señales hoy. "
+                    "Escribe /reanudar en «Mensajes guardados» (o usa el panel) si quieres seguir.", "error")
+        if self.cfg.get("close_on_limit"):
+            n = self.close_all()
+            self.notify(f"🔒 Se cerraron {n} operación(es) abiertas por el límite diario.", "error")
+
+    def risk_tick(self) -> None:
+        """Revisión periódica: corta aunque no llegue ninguna señal (p. ej. por pérdida flotante)."""
+        if self.guard is not None and self.guard.enabled:
+            v = self.risk_check()
+            if v.just_tripped:
+                self._on_trip(v.reason)
+
+    def _gate(self, num, who: str, msg_id) -> Optional[str]:
+        """Motivo por el que NO se debe abrir esta señal (pausa, límite diario, noticias) o None."""
+        if self.control is not None and self.control.is_paused(num):
+            why = "el bot está en pausa" if self.control.read()["paused"] else "este canal está en pausa"
+            self.outcome = ("ignorada", why)
+            self.notify(f"⏸ {who}Señal {msg_id} ignorada: {why}", "warn")
+            return why
+        if self.guard is not None and self.guard.enabled:
+            v = self.risk_check()
+            if not v.allowed:
+                self.outcome = ("ignorada", f"límite diario: {v.reason}")
+                if v.just_tripped:
+                    self._on_trip(v.reason)
+                else:
+                    self.notify(f"🛑 {who}Señal {msg_id} ignorada: límite diario alcanzado ({v.reason})", "warn")
+                return v.reason
+        if self.news is not None and self.news.enabled:
+            why = self.news.check(time.time())
+            if why:
+                self.outcome = ("ignorada", why)
+                self.notify(f"📰 {who}Señal {msg_id} ignorada por {why}", "warn")
+                return why
+        return None
+
+    def close_all(self) -> int:
+        """Cierra todas las posiciones del bot y cancela sus pendientes. Devuelve cuántas posiciones había."""
+        n = len(self.positions())
+        self._cancel(None, None)
+        self._close(None, None, 1.0)
+        return n
+
+    def auto_be_pass(self) -> int:
+        """Break-even automático: cuando la orden del TP1 de una señal ya se cerró y quedan otras de la
+        misma señal, mueve su SL al precio de entrada (solo si ya están en ganancia). Devuelve cuántas señales."""
+        if not self.cfg.get("auto_be"):
+            return 0
+        groups: dict = {}
+        for p in self.positions():
+            tag = p.comment.split(":")[0]
+            if re.fullmatch(r"tg\d+\.\d+", tag):
+                groups.setdefault(tag, []).append(p)
+        applied = 0
+        for tag, ps in groups.items():
+            if any(p.comment.endswith(":1") for p in ps):
+                self._tp1_seen.add(tag)             # el TP1 sigue abierto: aún no toca
+            elif tag in self._tp1_seen and tag not in self._be_done:
+                num, msg = (int(x) for x in tag[2:].split("."))
+                if self._set_sl(num, msg, None):
+                    self._be_done.add(tag)
+                    applied += 1
+                    self.notify(f"🛡 Break-even automático: se cumplió el TP1 de la señal {msg} "
+                                f"(canal #{num}); el SL de las demás quedó en la entrada.", "info")
+        alive = set(groups)                         # olvida las señales que ya no existen
+        self._tp1_seen &= alive
+        self._be_done &= alive
+        return applied
+
+    def status_text(self, channels: list) -> str:
+        """Resumen para el comando /estado de Telegram."""
+        bal, realized, floating = self.today_stats()
+        pos, orders = self.positions(), self.orders()
+        ctl = self.control.read() if self.control is not None else {"paused": False, "paused_channels": []}
+        lines = [f"{'SIMULACIÓN' if self.dry_run else 'OPERANDO'} | {self.account_desc or 'MT5'}",
+                 "⏸ EN PAUSA" if ctl["paused"] else
+                 ("▶️ Activo" + (f" (canales en pausa: {ctl['paused_channels']})" if ctl["paused_channels"] else "")),
+                 f"Hoy: realizado {realized:+.2f} | flotante {floating:+.2f} | saldo {bal:,.2f}"]
+        if self.guard is not None and self.guard.enabled:
+            st = self.guard.state
+            lines.append("🛑 Límite diario ALCANZADO: " + st.reason if st.tripped else
+                         f"Límite diario: no alcanzado ({st.signals} señales hoy)")
+        lines.append(f"Abiertas: {len(pos)} posición(es), {len(orders)} pendiente(s)")
+        for ch in channels:
+            n = len(self.positions(ch["num"]))
+            if n:
+                lines.append(f"  #{ch['num']} {ch.get('title') or ch['ref']}: {n}")
+        if self.news is not None and self.news.enabled:
+            now_block = self.news.check(time.time())
+            lines.append("📰 Noticias: " + (f"BLOQUEADO por {now_block}" if now_block else f"filtro activo ({self.news.mode})"))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------- comandos
     def handle_command(self, cmd: Command, msg_id: Optional[int] = None,
@@ -354,6 +499,7 @@ class Trader:
         m = self.mt5
         tick = m.symbol_info_tick(self.symbol)
         digits = self.si.digits
+        ok = 0                                   # posiciones que ya quedaron con el SL pedido
         for p in self.positions(num, msg_id):
             buy = p.type == m.POSITION_TYPE_BUY
             if price is None:
@@ -367,6 +513,7 @@ class Trader:
                 new_sl = price
             new_sl = round(new_sl, digits)
             if abs(new_sl - p.sl) < 10 ** -digits:
+                ok += 1                          # ya estaba así
                 continue
             md = self.min_stop_distance()
             gap = (tick.bid - new_sl) if buy else (new_sl - tick.ask)
@@ -376,7 +523,8 @@ class Trader:
                 self.notify(f"⚠️ Posición {p.ticket}: no se movió el SL a {new_sl} (queda a "
                             f"{gap:.2f} del precio; el broker exige {md:.2f})", "warn")
                 continue
-            self._send({"action": m.TRADE_ACTION_SLTP, "symbol": self.symbol,
-                        "position": p.ticket, "sl": new_sl, "tp": p.tp,
-                        "magic": self.magic},
-                       f"SL posición {p.ticket} -> {new_sl}")
+            ok += bool(self._send({"action": m.TRADE_ACTION_SLTP, "symbol": self.symbol,
+                                   "position": p.ticket, "sl": new_sl, "tp": p.tp,
+                                   "magic": self.magic},
+                                  f"SL posición {p.ticket} -> {new_sl}"))
+        return ok

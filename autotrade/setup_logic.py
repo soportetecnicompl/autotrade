@@ -43,6 +43,19 @@ class Settings:
     max_open_positions: int = 6
     enable_commands: bool = True
     stops_policy: str = "skip"
+    auto_be: bool = False                 # break-even automático cuando se cumple el TP1
+    # Protecciones
+    daily_loss_limit_pct: float = 0.0     # 0 = sin límite
+    max_signals_per_day: int = 0          # 0 = sin límite
+    close_on_limit: bool = False          # al saltar el límite diario, cerrar también lo abierto
+    max_spread_usd: float = 0.0           # 0 = sin filtro
+    news_mode: str = "off"                # off | manual | auto
+    news_minutes_before: int = 15
+    news_minutes_after: int = 15
+    news_manual: str = ""                 # «Fri 08:30 NFP; Wed 14:00 FOMC»
+    news_currencies: str = "USD"
+    # Interfaz
+    theme: str = "auto"                   # auto | light | dark
     # Filtro de horario
     filter_enabled: bool = False
     trading_days: str = "Mon-Fri"
@@ -97,11 +110,26 @@ requote_retries = 3
 retry_delay_ms = 200
 retry_max_slippage = 1.0
 stops_policy = {s.stops_policy}
+auto_be = {_b(s.auto_be)}
+
+[risk]
+daily_loss_limit_pct = {s.daily_loss_limit_pct:g}
+max_signals_per_day = {s.max_signals_per_day}
+close_on_limit = {_b(s.close_on_limit)}
 
 [filters]
 trading_days = {days}
 trading_hours = {hours}
 tz_offset_hours = {s.tz_offset_hours:g}
+max_spread_usd = {s.max_spread_usd:g}
+news_mode = {s.news_mode}
+news_minutes_before = {s.news_minutes_before}
+news_minutes_after = {s.news_minutes_after}
+news_manual = {s.news_manual.replace(chr(10), " ").replace(chr(13), " ")}
+news_currencies = {s.news_currencies}
+
+[ui]
+theme = {s.theme}
 
 [alerts]
 enabled = {_b(s.alerts_enabled)}
@@ -150,6 +178,12 @@ def load_settings(path: os.PathLike) -> Settings:
         "enable_commands": ("trading", "enable_commands"), "stops_policy": ("trading", "stops_policy"),
         "trading_days": ("filters", "trading_days"), "trading_hours": ("filters", "trading_hours"),
         "tz_offset_hours": ("filters", "tz_offset_hours"), "alerts_enabled": ("alerts", "enabled"),
+        "auto_be": ("trading", "auto_be"), "daily_loss_limit_pct": ("risk", "daily_loss_limit_pct"),
+        "max_signals_per_day": ("risk", "max_signals_per_day"), "close_on_limit": ("risk", "close_on_limit"),
+        "max_spread_usd": ("filters", "max_spread_usd"), "news_mode": ("filters", "news_mode"),
+        "news_minutes_before": ("filters", "news_minutes_before"), "news_minutes_after": ("filters", "news_minutes_after"),
+        "news_manual": ("filters", "news_manual"), "news_currencies": ("filters", "news_currencies"),
+        "theme": ("ui", "theme"),
         "notify_signals": ("alerts", "notify_signals"), "notify_skips": ("alerts", "notify_skips"),
         "heartbeat_url": ("alerts", "heartbeat_url"),
     }
@@ -225,6 +259,31 @@ def validate_trading(s: Settings) -> List[str]:
     return errs
 
 
+def validate_protections(s: Settings) -> List[str]:
+    from .news import validate_manual
+    errs = []
+    if not 0 <= s.daily_loss_limit_pct <= 50:
+        errs.append("El límite de pérdida diaria debe estar entre 0 y 50 % (0 = sin límite).")
+    if s.max_signals_per_day < 0:
+        errs.append("El máximo de señales por día no puede ser negativo (0 = sin límite).")
+    if not 0 <= s.max_spread_usd <= 50:
+        errs.append("El spread máximo debe estar entre 0 y 50 USD (0 = sin filtro).")
+    if s.news_mode not in ("off", "manual", "auto"):
+        errs.append("Elige cómo filtrar las noticias: desactivado, manual o automático.")
+    for label, v in (("antes", s.news_minutes_before), ("después", s.news_minutes_after)):
+        if not 0 <= v <= 240:
+            errs.append(f"Los minutos {label} de una noticia deben estar entre 0 y 240.")
+    if s.news_mode in ("manual", "auto") and s.news_manual.strip():
+        errs += [f"Noticias manuales: {e}" for e in validate_manual(s.news_manual)]
+    if s.news_mode == "manual" and not s.news_manual.strip():
+        errs.append("Escribe al menos una noticia (ej. «Fri 08:30 NFP») o elige otro modo de noticias.")
+    if s.news_mode == "auto" and not re.fullmatch(r"[A-Za-z]{3}(\s*,\s*[A-Za-z]{3})*", s.news_currencies.strip()):
+        errs.append("Las monedas de noticias van separadas por comas, ej. USD, EUR.")
+    if s.theme not in ("auto", "light", "dark"):
+        errs.append("El tema debe ser automático, claro u oscuro.")
+    return errs
+
+
 def validate_alerts(s: Settings) -> List[str]:
     u = s.heartbeat_url.strip()
     if u and not re.match(r"https?://\S+$", u):
@@ -234,7 +293,7 @@ def validate_alerts(s: Settings) -> List[str]:
 
 def validate_all(s: Settings) -> List[str]:
     return (validate_telegram(s) + validate_channel(s) + validate_mt5(s)
-            + validate_trading(s) + validate_alerts(s))
+            + validate_trading(s) + validate_protections(s) + validate_alerts(s))
 
 
 # ---------------------------------------------------------------- MT5 / red

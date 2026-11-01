@@ -16,3 +16,7 @@ selfcheck.log
 selfcheck-home/
 smoke/
 smoke.log
+control.json
+risk_state.json
+signals.jsonl
+news_cache.json

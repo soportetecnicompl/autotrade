@@ -16,7 +16,7 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 
-from autotrade.parser import parse
+from autotrade.parser import looks_like_signal, parse
 from autotrade.planner import Skip, plan_orders
 from autotrade.channels import parse_channels
 from autotrade.schedule import TradingSchedule
@@ -38,6 +38,7 @@ def load_config(path: str) -> dict:
             float(f.get("tz_offset_hours", 0) or 0))
     except ValueError as e:
         raise SystemExit(f"[filters] en {path}: {e}")
+    rk = cp["risk"] if cp.has_section("risk") else {}
     al = cp["alerts"] if cp.has_section("alerts") else {}
     yes = lambda k, d: str(al.get(k, d)).strip().lower() in ("1", "true", "yes", "si", "sí", "on")
     return {
@@ -71,6 +72,17 @@ def load_config(path: str) -> dict:
         "retry_delay_ms": r.getint("retry_delay_ms", 200),
         "retry_max_slippage": r.getfloat("retry_max_slippage", 1.0),
         "stops_policy": r.get("stops_policy", "skip").strip().lower(),
+        "auto_be": r.getboolean("auto_be", False),
+        "tz_offset_hours": float(f.get("tz_offset_hours", 0) or 0),
+        "daily_loss_limit_pct": float(rk.get("daily_loss_limit_pct", 0) or 0),
+        "max_signals_per_day": int(float(rk.get("max_signals_per_day", 0) or 0)),
+        "close_on_limit": str(rk.get("close_on_limit", "false")).strip().lower() in ("1", "true", "yes", "si", "sí", "on"),
+        "max_spread_usd": float(f.get("max_spread_usd", 0) or 0),
+        "news_mode": (f.get("news_mode", "off") or "off").strip().lower(),
+        "news_before": int(float(f.get("news_minutes_before", 15) or 0)),
+        "news_after": int(float(f.get("news_minutes_after", 15) or 0)),
+        "news_manual": f.get("news_manual", "") or "",
+        "news_currencies": [c.strip().upper() for c in (f.get("news_currencies", "USD") or "USD").split(",") if c.strip()],
     }
 
 
@@ -114,6 +126,19 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
                         prefix="[DRY-RUN] " if cfg["dry_run"] else "")
     trader = Trader(cfg)
     trader.notify = notifier.notify
+    # --- protecciones y control (los archivos viven en la carpeta de trabajo = carpeta de datos)
+    from autotrade.control import Control
+    from autotrade.eventlog import EventLog
+    from autotrade.news import NewsFilter
+    from autotrade.remote import RemoteHandler
+    from autotrade.risk import RiskGuard
+    control = Control("control.json")
+    guard = RiskGuard("risk_state.json", cfg["daily_loss_limit_pct"], cfg["max_signals_per_day"],
+                      cfg["tz_offset_hours"])
+    news_filter = NewsFilter(cfg["news_mode"], cfg["news_before"], cfg["news_after"], cfg["tz_offset_hours"],
+                             cfg["news_manual"], "news_cache.json", cfg["news_currencies"])
+    trader.control, trader.guard, trader.news = control, guard, news_filter
+    inbox = EventLog("signals.jsonl")
     tasks = []
     try:
         trader.connect()
@@ -148,27 +173,40 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
             text = event.raw_text or ""
             msg_id = event.message.id
             log.info("%sMensaje %s: %r", who, msg_id, text[:200])
+            rec = dict(channel=ch["num"], title=ch["title"], msg_id=msg_id, text=text)
             res = parse(text)
             if not res:
+                if looks_like_signal(text):          # parece una señal pero no se entendió: no ignorarla en silencio
+                    inbox.add(status="revisar", detail="parece una señal pero no la entendí", **rec)
+                    notifier.notify(f"🔎 {who}El mensaje {msg_id} parece una señal pero no lo entendí: "
+                                    f"«{text[:140]}». Revísalo.", "warn")
                 return
             try:
                 if res.signal:
                     age = (datetime.now(timezone.utc) - event.message.date).total_seconds()
                     if age > cfg["max_signal_age_sec"]:
                         log.warning("%sSeñal %s ignorada: tiene %.0fs de antigüedad", who, msg_id, age)
+                        inbox.add(status="ignorada", detail=f"llegó con {age:.0f}s de retraso", **rec)
                         notifier.notify(f"⚠️ {who}Señal {msg_id} ignorada: llegó con {age:.0f}s de retraso", "warn")
                         return
                     if not sched.allows(event.message.date.timestamp()):
                         log.info("%sSeñal %s ignorada: fuera de horario (%s)", who, msg_id, sched.describe())
+                        inbox.add(status="ignorada", detail="fuera de horario", **rec)
                         notifier.notify(f"⚠️ {who}Señal {msg_id} ignorada: fuera de horario", "warn")
                         return
                     trader.open_signal(res.signal, msg_id, ch)
+                    status, detail = trader.outcome
+                    inbox.add(status=status or "operada", detail=detail, **rec)
                 elif cfg["enable_commands"]:
                     # Si el comando responde a una señal, solo afecta a esa señal; si no, solo a las
                     # operaciones de ESTE canal (nunca a las de otros canales).
                     scope = event.message.reply_to_msg_id
                     for c in res.commands:
                         trader.handle_command(c, scope, ch)
+                    inbox.add(status="comando", detail=", ".join(c.kind for c in res.commands)
+                              + (f" (señal {scope})" if scope else " (todo el canal)"), **rec)
+                else:
+                    inbox.add(status="ignorada", detail="comandos del canal desactivados", **rec)
             except Exception as e:
                 log.exception("%sError procesando mensaje %s", who, msg_id)
                 notifier.notify(f"💥 {who}Error procesando el mensaje {msg_id}: {type(e).__name__}: {e}", "error")
@@ -192,6 +230,39 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
                     notifier.notify("🟢 MT5 recuperado.", "error")
                 ok_prev = ok
 
+        async def housekeeping():
+            """Cada 30 s: límite diario (aunque no lleguen señales), break-even automático y calendario."""
+            loop = asyncio.get_running_loop()
+            news_warned = False
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    msg = await loop.run_in_executor(None, news_filter.refresh)   # red: fuera del hilo principal
+                    if msg.startswith("No se pudo") and not news_warned:
+                        news_warned = True
+                        notifier.notify(f"⚠️ {msg}", "warn")
+                    elif msg and not msg.startswith("No se pudo"):
+                        news_warned = False
+                    trader.risk_tick()
+                    trader.auto_be_pass()
+                except Exception:  # noqa: BLE001 - una tarea de mantenimiento nunca debe tumbar al bot
+                    log.exception("Error en las tareas periódicas")
+
+        remote = RemoteHandler(control, cfg["channels"], lambda: trader.status_text(cfg["channels"]),
+                               trader.close_all, guard.resume)
+
+        @client.on(events.NewMessage(chats="me", outgoing=True))
+        async def on_saved_message(event):
+            """Comandos que te escribes en «Mensajes guardados» (/estado, /pausa, /reanudar, /cerrar…)."""
+            try:
+                reply = remote.handle(event.raw_text or "")
+            except Exception as e:  # noqa: BLE001
+                log.exception("Error en un comando de Telegram")
+                reply = f"❌ Error ejecutando el comando: {type(e).__name__}: {e}"
+            if reply:
+                log.info("Comando de Telegram: %r", (event.raw_text or "")[:60])
+                await notifier.send(reply, "error")
+
         async def heartbeat():
             """Ping periódico a un servicio externo (p. ej. healthchecks.io): si el
             equipo se apaga o se queda sin internet, el servicio te avisa por su cuenta.
@@ -207,16 +278,30 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
                 await asyncio.sleep(cfg["heartbeat_minutes"] * 60)
 
         tasks.append(asyncio.create_task(mt5_watchdog()))
+        tasks.append(asyncio.create_task(housekeeping()))
         if cfg["heartbeat_url"]:
             tasks.append(asyncio.create_task(heartbeat()))
 
+        prot = []
+        if cfg["daily_loss_limit_pct"]:
+            prot.append(f"pérdida diaria máx. {cfg['daily_loss_limit_pct']:g}%")
+        if cfg["max_signals_per_day"]:
+            prot.append(f"máx. {cfg['max_signals_per_day']} señales/día")
+        if cfg["max_spread_usd"]:
+            prot.append(f"spread ≤ {cfg['max_spread_usd']:g} USD")
+        if cfg["news_mode"] in ("manual", "auto"):
+            prot.append(f"noticias ({cfg['news_mode']})")
+        if cfg["auto_be"]:
+            prot.append("break-even automático")
         restarts = int(os.environ.get("AUTOTRADE_RESTARTS", "0") or 0)
         notifier.notify(
             ("🔁 Bot REINICIADO automáticamente (reinicio #%d: se había detenido o el equipo se reinició)\n" % restarts
              if restarts else "🟢 Bot iniciado\n")
             + f"Modo: {mode}\nCanales ({len(by_peer)}): {titles}\nMT5: {trader.account_desc}\n"
             f"Símbolo: {cfg['symbol']} | lote total {cfg['lot_size']} | máx. TPs {cfg['max_tps']}\n"
-            f"Horario: {'sin restricción' if sched.always else sched.describe()}", "error")
+            f"Horario: {'sin restricción' if sched.always else sched.describe()}\n"
+            + "Protecciones: " + (", ".join(prot) or "ninguna") + "\n"
+            "Control: escribe /ayuda en «Mensajes guardados» para pausar, ver el estado o cerrar todo.", "error")
 
         await client.run_until_disconnected()
         notifier.notify("🔴 Telegram se desconectó; el bot se reiniciará.", "error")

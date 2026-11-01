@@ -137,6 +137,16 @@ def parse_commands(text: str) -> List[Command]:
     return cmds
 
 
+LOOKS_RE = re.compile(r"\b(BUY|SELL|LONG|SHORT|COMPRA\w*|VENTA|VENDER?)\b")
+
+
+def looks_like_signal(text: str) -> bool:
+    """Heurística: el mensaje parece una señal (lado + algún precio) aunque el lector no la haya entendido.
+    Sirve para avisar «revisa este mensaje» en vez de ignorarlo en silencio."""
+    t = _normalize(text)
+    return bool(LOOKS_RE.search(t)) and len(re.findall(r"\d{3,5}", t)) >= 1
+
+
 def parse(text: str) -> ParseResult:
     sig = parse_signal(text)
     if sig:

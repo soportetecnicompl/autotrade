@@ -10,6 +10,7 @@ C = dict(
     TRADE_RETCODE_DONE=10009, TRADE_RETCODE_PLACED=10008, TRADE_RETCODE_INVALID_FILL=10030,
     TRADE_RETCODE_REQUOTE=10004, TRADE_RETCODE_PRICE_CHANGED=10020, TRADE_RETCODE_PRICE_OFF=10021,
     POSITION_TYPE_BUY=0, POSITION_TYPE_SELL=1, ACCOUNT_TRADE_MODE_DEMO=0,
+    DEAL_ENTRY_IN=0, DEAL_ENTRY_OUT=1, DEAL_ENTRY_INOUT=2, DEAL_ENTRY_OUT_BY=3,
 )
 
 
@@ -19,13 +20,14 @@ class FakeMT5(NS):
         self.tick = NS(bid=bid, ask=ask, time=1_700_000_000)
         self.sent = []
         self.retcodes = list(retcodes or [])   # retcodes a devolver en orden; luego DONE
-        self.pos, self.ords = [], []
+        self.pos, self.ords, self.deals = [], [], []
         self.term = NS(connected=True, trade_allowed=True)
         self.acc = NS(login=1, server="Demo", trade_mode=0, balance=1000.0, equity=1000.0, currency="USD")
 
     def symbol_info_tick(self, s): return self.tick
     def positions_get(self, symbol=None): return list(self.pos)
     def orders_get(self, symbol=None): return list(self.ords)
+    def history_deals_get(self, a, b): return list(self.deals)
     def terminal_info(self): return self.term
     def account_info(self): return self.acc
     def last_error(self): return (1, "fake")
@@ -47,6 +49,11 @@ def symbol_info(filling_mode=3, stops_level=0):
               visible=True)
 
 
-def position(ticket, side, price_open, sl=0.0, tp=0.0, volume=0.02, comment="tg1:1", magic=777):
+def position(ticket, side, price_open, sl=0.0, tp=0.0, volume=0.02, comment="tg1.1:1", magic=777,
+             profit=0.0, swap=0.0):
     return NS(ticket=ticket, type=0 if side == "BUY" else 1, price_open=price_open, sl=sl,
-              tp=tp, volume=volume, comment=comment, magic=magic)
+              tp=tp, volume=volume, comment=comment, magic=magic, profit=profit, swap=swap)
+
+
+def deal(entry, time, profit, magic=777, swap=0.0, commission=0.0):
+    return NS(entry=entry, time=time, profit=profit, swap=swap, commission=commission, fee=0.0, magic=magic)
