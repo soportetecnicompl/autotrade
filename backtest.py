@@ -51,7 +51,11 @@ async def fetch(a) -> None:
 
 # ------------------------------------------------------------------- precios
 def load_mt5(symbol: str, t0: float, t1: float, base_h: float, us_dst: bool) -> Prices:
-    import MetaTrader5 as mt5  # solo Windows
+    from autotrade.mt5_import import import_mt5
+    try:
+        mt5 = import_mt5()          # solo Windows
+    except ImportError as e:
+        raise SystemExit(f"No se pudo importar MetaTrader5 ({type(e).__name__}: {e}). Solo funciona en Windows.")
 
     if not mt5.initialize():
         raise SystemExit(f"mt5.initialize falló: {mt5.last_error()}")

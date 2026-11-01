@@ -4,6 +4,7 @@
   AutoTrade.exe --bot            bot con supervisor (se reinicia solo si se cae)
   AutoTrade.exe --bot-once       bot una sola vez (lo usa el supervisor)
   AutoTrade.exe --backtest ...   backtester (mismos argumentos que backtest.py)
+  AutoTrade.exe --selfcheck      comprueba que las librerías necesarias están incluidas
 """
 from __future__ import annotations
 
@@ -24,6 +25,13 @@ def main() -> int:
     # Todo se ejecuta desde la carpeta de datos del usuario (config.ini, sesión, logs)
     os.chdir(data_dir())
 
+    if args[:1] == ["--selfcheck"]:
+        from autotrade.selfcheck import check_imports, failed_required, format_report
+        res = check_imports()
+        print(format_report(res))
+        bad = failed_required(res)
+        print("\nRESULTADO:", "FALTAN COMPONENTES" if bad else "todo correcto")
+        return 1 if bad else 0
     if args[:1] == ["--bot"]:
         from autotrade.supervisor import run_supervisor
         return run_supervisor()

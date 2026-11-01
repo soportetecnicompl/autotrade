@@ -30,7 +30,7 @@ jobs:
       - name: Empaquetar AutoTrade.exe
         run: >
           pyinstaller --noconfirm --clean --windowed --name AutoTrade --paths .
-          --collect-submodules telethon --collect-all MetaTrader5
+          --collect-submodules telethon --collect-all MetaTrader5 --hidden-import numpy
           --hidden-import main --hidden-import backtest app.py
 
       - name: Prueba rapida del ejecutable (el parser dentro del paquete)
@@ -42,6 +42,15 @@ jobs:
                -ArgumentList '--bot-once --test "BUY GOLD 3900 SL 3890 TP 3910"'
           Get-Content smoke.log
           if ($p.ExitCode -ne 0 -or -not (Select-String -Path smoke.log -Pattern "side='BUY'" -Quiet)) { exit 1 }
+
+      - name: Autoverificacion del ejecutable (telethon, numpy y MetaTrader5 deben estar incluidos)
+        shell: pwsh
+        run: |
+          $env:AUTOTRADE_HOME = "$PWD\selfcheck-home"
+          $env:AUTOTRADE_OUTFILE = "$PWD\selfcheck.log"
+          $p = Start-Process -Wait -PassThru -FilePath ".\dist\AutoTrade\AutoTrade.exe" -ArgumentList '--selfcheck'
+          Get-Content selfcheck.log
+          if ($p.ExitCode -ne 0) { Write-Error "Faltan componentes dentro del ejecutable"; exit 1 }
 
       - name: Instalar Inno Setup
         run: choco install innosetup -y --no-progress

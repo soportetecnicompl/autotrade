@@ -166,15 +166,16 @@ class WelcomeStep(Step):
                 res["net"] = ("ok", "Conectado")
             except OSError:
                 res["net"] = ("bad", "Sin conexión a Telegram. Revisa tu internet.")
-            missing = []
-            for mod in ("telethon", "MetaTrader5"):
-                try:
-                    __import__(mod)
-                except ImportError:
-                    missing.append(mod)
-            res["lib"] = (("ok", "Completos") if not missing else
-                          ("warn" if missing == ["MetaTrader5"] and not IS_WINDOWS else "bad",
-                           "Faltan: " + ", ".join(missing)))
+            from .selfcheck import check_imports
+            results = check_imports()
+            bad = [r for r in results if r[3] and not r[1]]
+            soft = [r for r in results if not r[3] and not r[1]]
+            if bad:
+                res["lib"] = ("bad", "Faltan: " + "; ".join(f"{n} ({d})" for n, _, d, _ in bad))
+            elif soft:
+                res["lib"] = ("warn", "Solo disponible en Windows: " + ", ".join(n for n, *_ in soft))
+            else:
+                res["lib"] = ("ok", "Completos")
             return res
 
         def show(res):
@@ -993,7 +994,9 @@ class App(tk.Tk):
     # ---- estilo y estructura
     def _style(self):
         st = ttk.Style(self)
-        st.theme_use("vista" if "vista" in st.theme_names() else "clam")
+        # "clam" en todas las plataformas: el tema nativo de Windows ignora los colores de fondo
+        # y dejaba los botones azules con texto blanco sobre fondo gris (ilegibles).
+        st.theme_use("clam")
         fam = "Segoe UI" if IS_WINDOWS else None
         from tkinter import font as tkfont
         base = tkfont.nametofont("TkDefaultFont")

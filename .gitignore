@@ -12,3 +12,7 @@ dist/
 dist-installer/
 .venv-build/
 *.spec
+selfcheck.log
+selfcheck-home/
+smoke/
+smoke.log

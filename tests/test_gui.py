@@ -207,6 +207,26 @@ class GuiTests(unittest.TestCase):
         self.assertEqual("".join(got), "uno\ndos ñ\n")
         self.assertGreaterEqual(len(got), 2)                     # llegó en trozos, no todo al final
 
+    def test_theme_is_clam_so_blue_buttons_are_readable_on_windows(self):
+        from tkinter import ttk
+        self.assertEqual(ttk.Style(self.app).theme_use(), "clam")
+
+    def test_welcome_check_shows_the_real_missing_component_error(self):
+        from autotrade import selfcheck
+        fake = [("telethon", True, "1.45", True), ("tkinter", True, "8.6", True),
+                ("numpy", False, "ImportError: numpy._core.multiarray failed to import", True),
+                ("MetaTrader5", False, "ImportError: numpy", True)]
+        real = selfcheck.check_imports
+        selfcheck.check_imports = lambda *a, **k: fake
+        try:
+            self.app.show(0)
+        finally:
+            selfcheck.check_imports = real
+        text = self.app.steps[0].rows["lib"].cget("text")
+        self.assertIn("numpy", text)
+        self.assertIn("multiarray failed to import", text)
+        self.assertIn("✖", text)
+
     def test_welcome_label_texts_are_spanish_days(self):
         self.assertEqual(gui.days_label("Mon-Fri"), "Lun, Mar, Mié, Jue, Vie")
         self.assertEqual(gui.days_to_text({0, 2}), "Mon,Wed")

@@ -35,12 +35,13 @@ class Trader:
 
     # ---------------------------------------------------------------- conexión
     def connect(self) -> None:
+        from .mt5_import import import_mt5
         try:
-            import MetaTrader5 as mt5
+            mt5 = import_mt5()
         except ImportError as e:  # pragma: no cover
             raise SystemExit(
-                "No se pudo importar MetaTrader5. Solo funciona en Windows: "
-                "pip install MetaTrader5"
+                f"No se pudo importar MetaTrader5 ({type(e).__name__}: {e}). Solo funciona en "
+                "Windows y requiere la librería MetaTrader5 (pip install MetaTrader5)."
             ) from e
         self.mt5 = mt5
         kw = {}

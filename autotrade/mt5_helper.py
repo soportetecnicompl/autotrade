@@ -10,11 +10,19 @@ def probe(path: str = "", login: str = "", password: str = "", server: str = "",
 
     Devuelve {ok, error, account{...}, gold_symbols[...], symbol_ok, tick_time}.
     """
+    import sys
+
+    from .mt5_import import import_mt5
     try:
-        import MetaTrader5 as mt5
-    except ImportError:
-        return {"ok": False, "error": "La librería de MetaTrader 5 solo funciona en Windows "
-                                      "(y con MetaTrader 5 instalado)."}
+        mt5 = import_mt5()
+    except ImportError as e:
+        if sys.platform != "win32":
+            return {"ok": False, "error": "La librería de MetaTrader 5 solo funciona en Windows "
+                                          "(y con MetaTrader 5 instalado)."}
+        return {"ok": False, "error": (
+            f"No se pudo cargar la librería de MetaTrader 5 dentro de AutoTrade ({type(e).__name__}: {e}). "
+            "Es un fallo de la instalación del programa, no de tu cuenta ni de MT5: instala la versión "
+            "más reciente de AutoTrade o envía este texto completo para que lo corrijan.")}
     kw = {}
     if path:
         kw["path"] = path

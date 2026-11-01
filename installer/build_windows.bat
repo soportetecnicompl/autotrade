@@ -18,8 +18,17 @@ python -m unittest discover -s tests -t . || goto :error
 
 echo [3/4] Empaquetando AutoTrade.exe...
 pyinstaller --noconfirm --clean --windowed --name AutoTrade --paths . ^
-  --collect-submodules telethon --collect-all MetaTrader5 ^
+  --collect-submodules telethon --collect-all MetaTrader5 --hidden-import numpy ^
   --hidden-import main --hidden-import backtest app.py || goto :error
+
+echo Comprobando que las librerias quedaron incluidas...
+set "AUTOTRADE_HOME=%CD%\selfcheck-home"
+set "AUTOTRADE_OUTFILE=%CD%\selfcheck.log"
+start /wait "" "dist\AutoTrade\AutoTrade.exe" --selfcheck
+set "SC=%errorlevel%"
+type selfcheck.log
+set "AUTOTRADE_OUTFILE="
+if not "%SC%"=="0" (echo ERROR: faltan componentes dentro del ejecutable. & goto :error)
 
 echo [4/4] Creando el instalador...
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
