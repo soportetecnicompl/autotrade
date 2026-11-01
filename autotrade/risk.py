@@ -72,8 +72,18 @@ class RiskGuard:
             self._save()
         return self.state
 
+    def _adopt_external_override(self) -> None:
+        """El panel puede decir «seguir hoy» escribiendo el archivo desde otro proceso."""
+        if self.state.override or not self.path:
+            return
+        disk = self._load()
+        if disk.override and disk.day == self.state.day:
+            self.state.override, self.state.tripped = True, False
+
     def check(self, now: float, balance: float, realized: float, floating: float) -> Verdict:
         st = self._roll(now, balance, realized)
+        if st.tripped:
+            self._adopt_external_override()
         if st.override:
             return Verdict(True)
         if not st.tripped:

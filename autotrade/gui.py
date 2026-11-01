@@ -21,7 +21,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Callable, Dict, List, Optional
 
-from . import setup_logic as sl
+from . import backup, mt5_helper, perf, setup_logic as sl, updates
+from .control import Control
+from .eventlog import EventLog
+from .risk import RiskGuard, day_key
+from .version import __version__
 from .paths import (IS_WINDOWS, data_dir, launcher_cmd, pid_alive, popen_kwargs, stop_tree)
 from .schedule import parse_days
 from .setup_logic import Settings
@@ -29,14 +33,66 @@ from .channels import ChannelCfg, channel_ref, next_num
 from .supervisor import PID_FILE, read_pid
 
 WRAP = 640
-# Paleta (todos los colores se definen aquí; los estilos de ttk los usan de forma explícita para
-# cada estado, porque el texto sobre fondos de color debe verse igual en todas las plataformas)
-BG, BAR, BORDER = "#ffffff", "#f3f5f9", "#d5dae6"
-TEXT, MUTED = "#1d2433", "#667085"
-ACCENT, ACCENT_DK, ACCENT_PR = "#2a5bd7", "#1f48ad", "#1a3d94"
-OK, BAD, WARN = "#0f8a4f", "#c4321f", "#a15c00"
-SIDEBAR, SIDE_ACTIVE, SIDE_HOVER = "#18202f", "#2a3650", "#222c41"
-TINT = {"ok": ("#e8f6ee", OK), "warn": ("#fff3de", WARN), "bad": ("#fdeceb", BAD), "info": ("#eaf0fd", ACCENT_DK)}
+
+LIGHT = dict(
+    BG="#ffffff", BAR="#f3f5f9", BORDER="#d5dae6", TEXT="#1d2433", MUTED="#667085",
+    ACCENT="#2a5bd7", ACCENT_DK="#1f48ad", ACCENT_PR="#1a3d94", LINK="#1f48ad",
+    OK="#0b7a43", BAD="#c4321f", WARN="#a15c00", DANGER="#c4321f",
+    SIDEBAR="#18202f", SIDE_ACTIVE="#2a3650", SIDE_HOVER="#222c41", SIDE_TEXT="#aab4cc", SIDE_DONE="#dfe5f3",
+    SIDE_SUB="#8d99b3", CHIP="#38435c", CHIP_DONE="#1f9d63", SIDE_BAR="#7aa2ff",
+    FIELD="#ffffff", SEL="#dbe6ff", TROUGH="#e6eaf2", DIS_FG="#98a1b3", HOVER_BORDER="#aab4cc",
+    B2_BG="#f4f6fb", B2_BORDER="#9aa6c0", B2_HOVER="#e4e9f5", B2_PRESS="#d6ddee", B2_DIS_BG="#f4f6fa", B2_DIS_FG="#6f788d",
+    B1_DIS_BG="#dfe5f5", B1_DIS_FG="#6b7fb5",
+    BD_HOVER="#a82a19", BD_PRESS="#8f2214", BD_DIS_BG="#f6dcd8", BD_DIS_FG="#b0675d",
+    IND_BORDER="#7d89a6", IND_PRESS="#e1e7f3", HEAD_HOVER="#e8ecf5", SCROLL="#c9d0de", SCROLL_HOVER="#aab4cc",
+    TINT_OK=("#e8f6ee", "#0b7a43"), TINT_WARN=("#fff3de", "#a15c00"), TINT_BAD=("#fdeceb", "#c4321f"),
+    TINT_INFO=("#eaf0fd", "#1f48ad"),
+)
+DARK = dict(
+    BG="#12161f", BAR="#181d28", BORDER="#2c3444", TEXT="#e6e9f0", MUTED="#9aa4b8",
+    ACCENT="#3b69e6", ACCENT_DK="#2f58cc", ACCENT_PR="#2749b0", LINK="#8fb0ff",
+    OK="#4fd69a", BAD="#ff7a6b", WARN="#ffb454", DANGER="#c2392a",
+    SIDEBAR="#0c1018", SIDE_ACTIVE="#1b2436", SIDE_HOVER="#141b29", SIDE_TEXT="#aab4cc", SIDE_DONE="#dfe5f3",
+    SIDE_SUB="#7d899f", CHIP="#2c3548", CHIP_DONE="#1f9d63", SIDE_BAR="#6c93ff",
+    FIELD="#1a202c", SEL="#2a3a63", TROUGH="#232b3a", DIS_FG="#6c768b", HOVER_BORDER="#4b5870",
+    B2_BG="#222a38", B2_BORDER="#4a566e", B2_HOVER="#2b3548", B2_PRESS="#34405a", B2_DIS_BG="#1c2330", B2_DIS_FG="#8a94a9",
+    B1_DIS_BG="#26314d", B1_DIS_FG="#8fa3d6",
+    BD_HOVER="#a82f21", BD_PRESS="#8f261a", BD_DIS_BG="#3c1f1d", BD_DIS_FG="#d29a92",
+    IND_BORDER="#6f7b94", IND_PRESS="#34405a", HEAD_HOVER="#232b3a", SCROLL="#3a4558", SCROLL_HOVER="#4b5870",
+    TINT_OK=("#12301f", "#5ee0a0"), TINT_WARN=("#3a2a0c", "#ffc66d"), TINT_BAD=("#3d1a17", "#ff8f82"),
+    TINT_INFO=("#16264a", "#9bb8ff"),
+)
+THEME_NAMES = {"auto": "Automático (como Windows)", "light": "Claro", "dark": "Oscuro"}
+
+
+def detect_system_dark() -> bool:
+    """¿Windows está en modo oscuro? (fuera de Windows: no)."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_theme(pref: str) -> str:
+    return pref if pref in ("light", "dark") else ("dark" if detect_system_dark() else "light")
+
+
+def apply_palette(name: str) -> None:
+    """Fija los colores globales ANTES de crear la ventana (todos los widgets los leen al crearse)."""
+    global TINT
+    pal = DARK if name == "dark" else LIGHT
+    for key, val in pal.items():
+        if not key.startswith("TINT_"):
+            globals()[key] = val
+    TINT = {"ok": pal["TINT_OK"], "warn": pal["TINT_WARN"], "bad": pal["TINT_BAD"], "info": pal["TINT_INFO"]}
+
+
+apply_palette("light")
 DAYS = [("Mon", "Lun"), ("Tue", "Mar"), ("Wed", "Mié"), ("Thu", "Jue"), ("Fri", "Vie"), ("Sat", "Sáb"), ("Sun", "Dom")]
 TZ_CHOICES = ["-8", "-7", "-6", "-5", "-4", "-3", "0", "1", "2", "3"]
 SAMPLE = ("SELL GOLD  3912 -  3917\n\nTakeprofit1 = 3902\nTakeprofit2 = 3892\nTakeprofit3 = 3812\n\nStoploss = 3932")
@@ -386,7 +442,7 @@ class ChannelStep(Step):
 
         self.avail = make_tree(self, ("sel", "name", "kind", "user"),
                                (("sel", "", 54), ("name", "Canal o grupo", 332), ("kind", "Tipo", 70),
-                                ("user", "@usuario", 150)), height=6)
+                                ("user", "@usuario", 150)), height=5)
         self.avail.bind("<Button-1>", lambda e: self.on_click(self.avail, e, self.toggle_iid))
         self.avail.bind("<Double-1>", lambda e: self.on_double(self.avail, e, self.toggle_iid))
 
@@ -812,6 +868,62 @@ class ScheduleStep(Step):
         return True
 
 
+class ProtectionsStep(Step):
+    title, short = "Protecciones", "Protecciones"
+
+    def build(self):
+        self.head("Protecciones y seguridad",
+                  "Reglas para que una mala racha, una noticia o un spread disparado no te cuesten de más. "
+                  "Todo es opcional: 0 o «desactivado» significa sin límite.")
+        v = self.app.v
+
+        def line(parent, label, name, hint, width=8, label_w=26):
+            r = ttk.Frame(parent)
+            r.pack(anchor="w", fill="x", pady=3)
+            ttk.Label(r, text=label, width=label_w).pack(side="left")
+            ttk.Entry(r, textvariable=v[name], width=width).pack(side="left")
+            ttk.Label(r, text=hint, style="Muted.TLabel").pack(side="left", padx=8)
+
+        box = ttk.LabelFrame(self, text=" Límites del día ", padding=(12, 6))
+        box.pack(fill="x", pady=(0, 8))
+        line(box, "Pérdida máxima por día", "daily_loss_limit_pct", "% del saldo. Al llegar, no se abren más señales hoy.")
+        line(box, "Máximo de señales por día", "max_signals_per_day", "señales (0 = sin límite)")
+        ttk.Checkbutton(box, text="Al llegar al límite de pérdida, cerrar también lo que esté abierto",
+                        variable=v["close_on_limit"]).pack(anchor="w", pady=(2, 0))
+
+        box = ttk.LabelFrame(self, text=" Condiciones del mercado ", padding=(12, 6))
+        box.pack(fill="x", pady=(0, 8))
+        line(box, "Spread máximo", "max_spread_usd", "USD (0 = sin filtro). Con spread mayor no se abre la señal.")
+
+        box = ttk.LabelFrame(self, text=" Noticias importantes ", padding=(12, 6))
+        box.pack(fill="x", pady=(0, 8))
+        for text, val in (("Desactivado", "off"), ("Solo las horas que yo indique", "manual"),
+                          ("Automático (calendario económico) + mis horas", "auto")):
+            ttk.Radiobutton(box, text=text, variable=v["news_mode"], value=val).pack(anchor="w")
+        r = ttk.Frame(box)
+        r.pack(anchor="w", pady=(6, 2))
+        ttk.Label(r, text="No abrir señales").pack(side="left")
+        ttk.Spinbox(r, from_=0, to=240, textvariable=v["news_minutes_before"], width=5).pack(side="left", padx=6)
+        ttk.Label(r, text="min antes y").pack(side="left")
+        ttk.Spinbox(r, from_=0, to=240, textvariable=v["news_minutes_after"], width=5).pack(side="left", padx=6)
+        ttk.Label(r, text="min después de cada noticia").pack(side="left")
+        line(box, "Mis noticias", "news_manual", "", width=44, label_w=14)
+        ttk.Label(box, text="Ej.: Fri 08:30 NFP; Wed 14:00 FOMC   (días en inglés, hora en tu zona del paso «Horario»)",
+                  style="Muted.TLabel").pack(anchor="w")
+        line(box, "Monedas (automático)", "news_currencies", "ej. USD, EUR", width=14, label_w=20)
+
+        box = ttk.LabelFrame(self, text=" Gestión automática ", padding=(12, 6))
+        box.pack(fill="x")
+        ttk.Checkbutton(box, text="Mover a break-even automáticamente cuando se cumpla el TP1 de una señal",
+                        variable=v["auto_be"]).pack(anchor="w")
+
+    def check(self):
+        return sl.validate_protections(self.app.sync_settings())
+
+    def done(self):
+        return not sl.validate_protections(self.app.settings)
+
+
 class AlertsStep(Step):
     title, short = "Avisos", "Avisos"
 
@@ -869,7 +981,7 @@ class TestStep(Step):
         ttk.Entry(r, textvariable=self.price, width=10).pack(side="left", padx=6)
         ttk.Label(r, text="(opcional; si lo dejas vacío se usa el centro de la zona de entrada)", style="Muted.TLabel").pack(side="left")
         ttk.Button(self, text="Analizar mensaje", style="Accent.TButton", command=self.analyze).pack(anchor="w", pady=6)
-        self.out = scrolledtext.ScrolledText(self, height=11, width=70, wrap="word", state="disabled", background="#f5f6f8")
+        self.out = scrolledtext.ScrolledText(self, height=11, width=70, wrap="word", state="disabled", background=BAR)
         self.out.pack(fill="both", expand=True, pady=4)
 
     def write(self, text: str):
@@ -1122,25 +1234,96 @@ class StartupStep(Step):
 
 class PanelStep(Step):
     title, short = "Panel de control", "Panel"
+    RESULTS = {"operada": ("✅ Operada", "ok"), "parcial": ("◐ Parcial", "warn"), "ignorada": ("⏭ Ignorada", "muted"),
+               "comando": ("🔧 Comando", "info"), "revisar": ("🔎 Revisar", "warn"), "error": ("❌ Error", "bad")}
 
     def build(self):
         self.head("Panel de control")
         self.mode = ttk.Label(self, text="", font=self.app.font_big, anchor="center")
-        self.mode.pack(fill="x", pady=4)
-        self.summary = ttk.Label(self, text="", justify="left", style="Muted.TLabel", wraplength=WRAP)
-        self.summary.pack(anchor="w", pady=4)
-        r = ttk.Frame(self); r.pack(anchor="w", pady=8)
+        self.mode.pack(fill="x", pady=(0, 2))
+        self.summary = ttk.Label(self, text="", justify="left", style="Muted.TLabel", wraplength=WRAP + 40)
+        self.summary.pack(anchor="w", pady=(2, 4))
+        r = ttk.Frame(self)
+        r.pack(anchor="w", pady=4)
         self.start_btn = ttk.Button(r, text="▶  Iniciar", style="Accent.TButton", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(r, text="■  Detener", style="Danger.TButton", command=self.stop)
         self.stop_btn.pack(side="left", padx=8)
-        ttk.Button(r, text="Abrir carpeta de datos", command=lambda: self.app.open_path(data_dir())).pack(side="left", padx=8)
+        self.pause_btn = ttk.Button(r, text="⏸  Pausar señales", command=self.toggle_pause)
+        self.pause_btn.pack(side="left")
+        self.limit_btn = ttk.Button(r, text="Seguir hoy", command=self.resume_today)   # solo se muestra si saltó el límite
         self.st = self.status()
-        ttk.Label(self, text="Registro del programa", style="H2.TLabel").pack(anchor="w", pady=(6, 2))
-        self.log = scrolledtext.ScrolledText(self, height=12, width=80, wrap="none", state="disabled", font=("Consolas" if IS_WINDOWS else "TkFixedFont", 9))
+
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, pady=(8, 0))
+        # --- Señales recibidas
+        t = ttk.Frame(self.nb, padding=(0, 8, 0, 0))
+        self.nb.add(t, text="  Señales  ")
+        self.inbox_rows: List[dict] = []
+        self._inbox_sig = None
+        self.inbox = make_tree(t, ("time", "chan", "res", "detail"),
+                               (("time", "Hora", 76), ("chan", "Canal", 130), ("res", "Resultado", 110),
+                                ("detail", "Detalle", 330)), height=8)
+        for tag, color in (("ok", OK), ("bad", BAD), ("warn", WARN), ("muted", MUTED), ("info", LINK)):
+            self.inbox.tag_configure(tag, foreground=color)
+        self.inbox.bind("<Double-1>", self.show_message)
+        ttk.Label(t, text="Doble clic en una fila para ver el mensaje completo. «Revisar» = parece una señal pero "
+                          "no se entendió.", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        # --- Rendimiento
+        t = ttk.Frame(self.nb, padding=(0, 8, 0, 0))
+        self.nb.add(t, text="  Rendimiento  ")
+        bar = ttk.Frame(t)
+        bar.pack(fill="x", pady=(0, 6))
+        self.perf_btn = ttk.Button(bar, text="Actualizar desde MetaTrader 5", command=self.load_perf)
+        self.perf_btn.pack(side="left")
+        self.perf_note = ttk.Label(bar, text="", style="Muted.TLabel")
+        self.perf_note.pack(side="left", padx=10)
+        self.perf = make_tree(t, ("chan", "sig", "cl", "wr", "d0", "d7", "d30", "tot"),
+                              (("chan", "Canal", 170), ("sig", "Señales", 64), ("cl", "Cerradas", 70), ("wr", "Acierto", 64),
+                               ("d0", "Hoy", 70), ("d7", "7 días", 76), ("d30", "30 días", 76), ("tot", "Total", 80)),
+                              height=6)
+        ttk.Label(t, text="Resultado real en USD (con comisiones y swaps) de las operaciones de este programa en MT5. "
+                          "En simulación no hay operaciones.", style="Muted.TLabel", wraplength=WRAP).pack(anchor="w", pady=(4, 0))
+        # --- Registro
+        t = ttk.Frame(self.nb, padding=(0, 8, 0, 0))
+        self.nb.add(t, text="  Registro  ")
+        self.log = scrolledtext.ScrolledText(t, height=9, width=80, wrap="none", state="disabled",
+                                             font=("Consolas" if IS_WINDOWS else "TkFixedFont", 9))
         self.log.pack(fill="both", expand=True)
+        # --- Más
+        t = ttk.Frame(self.nb, padding=(4, 12, 4, 0))
+        self.nb.add(t, text="  Más  ")
+        r = ttk.Frame(t)
+        r.pack(anchor="w", pady=4)
+        ttk.Label(r, text="Tema de la ventana", width=22).pack(side="left")
+        self.theme_var = tk.StringVar(value=THEME_NAMES.get(self.app.settings.theme, THEME_NAMES["auto"]))
+        ttk.Combobox(r, textvariable=self.theme_var, values=list(THEME_NAMES.values()), state="readonly", width=26).pack(side="left")
+        ttk.Button(r, text="Aplicar", command=self.apply_theme).pack(side="left", padx=8)
+        r = ttk.Frame(t)
+        r.pack(anchor="w", pady=4)
+        ttk.Label(r, text="Copia de seguridad", width=22).pack(side="left")
+        ttk.Button(r, text="Guardar configuración…", command=self.export_backup).pack(side="left")
+        ttk.Button(r, text="Restaurar…", command=self.import_backup).pack(side="left", padx=8)
+        self.with_session = tk.BooleanVar(value=False)
+        ttk.Checkbutton(t, text="Incluir la sesión de Telegram", variable=self.with_session).pack(anchor="w", padx=(176, 0))
+        ttk.Label(t, text="Evita volver a pedir el código, pero da acceso a tu cuenta: guarda ese archivo en un lugar "
+                          "seguro y no lo compartas.", style="Muted.TLabel", wraplength=WRAP - 180).pack(anchor="w", padx=(176, 0))
+        r = ttk.Frame(t)
+        r.pack(anchor="w", pady=(10, 4))
+        ttk.Label(r, text=f"AutoTrade {__version__}", width=22).pack(side="left")
+        self.upd_btn = ttk.Button(r, text="Buscar actualizaciones", command=self.check_updates)
+        self.upd_btn.pack(side="left")
+        self.upd_open = ttk.Button(r, text="Abrir página de descarga", command=lambda: webbrowser.open(self._upd_url))
+        self._upd_url = updates.RELEASES_PAGE
+        self.upd_msg = ttk.Label(t, text="", style="Muted.TLabel", wraplength=WRAP)
+        self.upd_msg.pack(anchor="w", padx=(176, 0))
+        r = ttk.Frame(t)
+        r.pack(anchor="w", pady=(10, 0))
+        ttk.Label(r, text="Archivos del programa", width=22).pack(side="left")
+        ttk.Button(r, text="Abrir carpeta de datos", command=lambda: self.app.open_path(data_dir())).pack(side="left")
         self._jobs: set = set()
 
+    # ---- tareas programadas (se cancelan al cerrar)
     def later(self, ms: int, fn):
         jid = self.after(ms, lambda: (self._jobs.discard(jid), fn()))
         self._jobs.add(jid)
@@ -1157,6 +1340,16 @@ class PanelStep(Step):
     def on_show(self):
         self.refresh()
 
+    # ---- estado
+    def control(self) -> Control:
+        return Control(data_dir() / "control.json")
+
+    def limit_state(self):
+        """Estado del límite diario de HOY (None si no aplica o no ha saltado)."""
+        st = RiskGuard(data_dir() / "risk_state.json").state
+        today = day_key(time.time(), self.app.settings.tz_offset_hours)
+        return st if st.tripped and not st.override and st.day == today else None
+
     def refresh(self):
         s = self.app.settings
         if s.dry_run:
@@ -1164,26 +1357,110 @@ class PanelStep(Step):
         else:
             self.mode.config(text="MODO REAL — se enviarán órdenes a tu cuenta", foreground=BAD)
         sched = "sin restricción" if not s.filter_enabled else f"{days_label(s.trading_days)} · {s.trading_hours} (UTC{s.tz_offset_hours:+g})"
+        ctl = self.control().read()
         chans = "; ".join(
             f"{c.title or c.ref} (lote {c.lot_size or s.lot_size:g}"
-            f"{', ' + str(c.max_tps) + ' TP' if c.max_tps else ''}{'' if c.enabled else ', PAUSADO'})"
+            f"{', ' + str(c.max_tps) + ' TP' if c.max_tps else ''}{'' if c.enabled else ', DESACTIVADO'}"
+            f"{', EN PAUSA' if c.num in ctl['paused_channels'] else ''})"
             for c in s.channels) or "—"
-        self.summary.config(text=(f"Canales: {chans}\nSímbolo: {s.symbol}\n"
-                                  f"Lote total: {s.lot_size}   |   TPs: {s.max_tps}   |   Horario: {sched}\n"
+        prot = []
+        if s.daily_loss_limit_pct:
+            prot.append(f"pérdida diaria {s.daily_loss_limit_pct:g}%")
+        if s.max_signals_per_day:
+            prot.append(f"{s.max_signals_per_day} señales/día")
+        if s.max_spread_usd:
+            prot.append(f"spread ≤ {s.max_spread_usd:g}")
+        if s.news_mode != "off":
+            prot.append(f"noticias ({s.news_mode})")
+        if s.auto_be:
+            prot.append("BE automático")
+        self.summary.config(text=(f"Canales: {chans}\nSímbolo: {s.symbol}  |  Lote total: {s.lot_size}  |  TPs: {s.max_tps}  |  "
+                                  f"Horario: {sched}\nProtecciones: {', '.join(prot) or 'ninguna'}  |  "
                                   f"Avisos por Telegram: {'sí' if s.alerts_enabled else 'no'}"))
         running = self.app.bot_running()
-        pid = read_pid()
+        paused = ctl["paused"]
         self.start_btn.state(["disabled" if running else "!disabled"])
         self.stop_btn.state(["!disabled" if running else "disabled"])
-        if running:
-            self.set_status(self.st, f"● El programa está FUNCIONANDO (proceso {pid}).", "ok")
-        elif self.st.cget("text").startswith("●") or not self.st.cget("text"):
+        self.pause_btn.config(text="▶  Reanudar señales" if paused else "⏸  Pausar señales")
+        tripped = self.limit_state()
+        if tripped and not self.limit_btn.winfo_ismapped():
+            self.limit_btn.pack(side="left", padx=8)
+        elif not tripped and self.limit_btn.winfo_ismapped():
+            self.limit_btn.pack_forget()
+        if tripped:
+            self.set_status(self.st, f"🛑 Límite diario alcanzado: {tripped.reason}. No se abren señales nuevas hoy.", "bad")
+        elif paused:
+            self.set_status(self.st, "⏸ EN PAUSA: no se abren señales nuevas (los mensajes de gestión siguen funcionando).", "warn")
+        elif running:
+            self.set_status(self.st, f"● El programa está FUNCIONANDO (proceso {read_pid()}).", "ok")
+        elif not self.st.cget("text") or self.st.cget("text")[:1] in "●⏸🛑":
             self.set_status(self.st, "○ Detenido. Pulsa «Iniciar» para empezar.", "info")
+        self.refresh_inbox()
         self.tail()
         self.cancel_jobs()
         if self.app.current is self:
             self.later(2000, self.refresh)
 
+    # ---- señales recibidas
+    def local_time(self, ts: float) -> str:
+        return time.strftime("%H:%M:%S", time.gmtime(ts + self.app.settings.tz_offset_hours * 3600))
+
+    def refresh_inbox(self):
+        path = data_dir() / "signals.jsonl"
+        try:
+            sig = (path.stat().st_mtime, path.stat().st_size)
+        except OSError:
+            sig = None
+        if sig == self._inbox_sig:
+            return
+        self._inbox_sig = sig
+        self.inbox_rows = list(reversed(EventLog(path).tail(150)))          # lo más nuevo arriba
+        self.inbox.delete(*self.inbox.get_children())
+        for i, r in enumerate(self.inbox_rows):
+            label, tag = self.RESULTS.get(r.get("status", ""), (r.get("status", "?"), "muted"))
+            self.inbox.insert("", "end", iid=str(i), tags=(tag,), values=(
+                self.local_time(r.get("ts", 0)), r.get("title") or f"#{r.get('channel', '?')}", label, r.get("detail", "")))
+
+    def show_message(self, ev):
+        iid = self.inbox.identify_row(ev.y)
+        if not iid:
+            return
+        r = self.inbox_rows[int(iid)]
+        label = self.RESULTS.get(r.get("status", ""), (r.get("status", ""), ""))[0]
+        messagebox.showinfo(f"{r.get('title', '')} · mensaje {r.get('msg_id', '')}",
+                            f"{label}\n{r.get('detail', '')}\n\n— Mensaje —\n{r.get('text', '')}")
+
+    # ---- rendimiento real por canal
+    def load_perf(self):
+        s = self.app.sync_settings()
+        self.perf_btn.state(["disabled"])
+        self.perf_note.config(text="Consultando MetaTrader 5…", foreground=MUTED)
+
+        def work():
+            res = mt5_helper.fetch_deals(s.mt5_path, s.mt5_login, s.mt5_password, s.mt5_server, s.symbol, s.magic, 90)
+            if not res["ok"]:
+                return res
+            res["rows"] = perf.aggregate(res["deals"], time.time(), s.tz_offset_hours, res["server_offset"])
+            return res
+
+        def done(res):
+            self.perf_btn.state(["!disabled"])
+            self.perf.delete(*self.perf.get_children())
+            if not res["ok"]:
+                return self.perf_note.config(text="✖ " + res["error"], foreground=BAD)
+            names = {c.num: c.title or c.ref for c in s.channels}
+            money = lambda v: f"{v:+.2f}"
+            for r in res["rows"]:
+                name = names.get(r["num"], f"Canal #{r['num']} (quitado)") if r["num"] is not None else "Sin etiqueta (otras)"
+                self.perf.insert("", "end", values=(name, r["signals"], r["closed"], f"{r['win_rate']:.0f}%",
+                                                    money(r["pnl_today"]), money(r["pnl_7d"]), money(r["pnl_30d"]),
+                                                    money(r["pnl_total"])))
+            self.perf_note.config(text=("Últimos 90 días." if res["rows"] else "Todavía no hay operaciones cerradas del programa."),
+                                  foreground=MUTED)
+        self.app.bg(work, done, lambda e: (self.perf_btn.state(["!disabled"]),
+                                           self.perf_note.config(text=f"✖ {e}", foreground=BAD)))
+
+    # ---- registro
     def tail(self):
         p = data_dir() / "autotrade.log"
         text = ""
@@ -1198,6 +1475,7 @@ class PanelStep(Step):
         self.log.see("end")
         self.log.config(state="disabled")
 
+    # ---- control
     def start(self):
         s = self.app.sync_settings()
         errs = sl.validate_all(s)
@@ -1229,11 +1507,72 @@ class PanelStep(Step):
         self.set_status(self.st, "○ Detenido.", "info")
         self.later(800, self.refresh)
 
+    def toggle_pause(self):
+        c = self.control()
+        c.set_paused(not c.read()["paused"])
+        self.refresh()
+
+    def resume_today(self):
+        RiskGuard(data_dir() / "risk_state.json").resume()
+        self.refresh()
+
+    # ---- más
+    def apply_theme(self):
+        key = next((k for k, v in THEME_NAMES.items() if v == self.theme_var.get()), "auto")
+        if key == self.app.settings.theme:
+            return
+        self.app.v["theme"].set(key)
+        self.app.restart()
+
+    def export_backup(self):
+        path = filedialog.asksaveasfilename(title="Guardar copia de seguridad", defaultextension=".zip",
+                                            initialfile="autotrade-copia.zip", filetypes=[("Copia de AutoTrade", "*.zip")])
+        if not path:
+            return
+        self.app.sync_settings()
+        self.app.save()
+        try:
+            names = backup.export_zip(data_dir(), path, self.with_session.get())
+        except (OSError, FileNotFoundError) as e:
+            return messagebox.showerror("No se pudo guardar", str(e))
+        messagebox.showinfo("Copia guardada", f"Se guardó: {', '.join(names)}\n\n{path}"
+                            + ("\n\nIncluye tu sesión de Telegram: no la compartas con nadie." if self.with_session.get() else ""))
+
+    def import_backup(self):
+        path = filedialog.askopenfilename(title="Elegir copia de seguridad", filetypes=[("Copia de AutoTrade", "*.zip")])
+        if not path:
+            return
+        if not messagebox.askyesno("Restaurar copia", "Se reemplazará la configuración actual (se guarda una copia "
+                                   "como config.ini.bak-…). ¿Continuar?"):
+            return
+        try:
+            backup.import_zip(path, data_dir())
+        except (OSError, ValueError) as e:
+            return messagebox.showerror("No se pudo restaurar", str(e))
+        self.app.settings = sl.load_settings(data_dir() / "config.ini")
+        messagebox.showinfo("Copia restaurada", "Listo. La ventana se reiniciará para cargar la configuración.")
+        self.app.restart(save=False)
+
+    def check_updates(self):
+        self.upd_btn.state(["disabled"])
+        self.upd_msg.config(text="Buscando…", foreground=MUTED)
+
+        def done(r):
+            self.upd_btn.state(["!disabled"])
+            self._upd_url = r["url"]
+            self.upd_msg.config(text=r["message"], foreground={"newer": WARN, "current": OK, "none": MUTED, "error": BAD}[r["status"]])
+            if r["status"] == "newer":
+                self.upd_open.pack(side="left", padx=8)
+            else:
+                self.upd_open.pack_forget()
+        self.app.bg(lambda: updates.check(__version__), done,
+                    lambda e: (self.upd_btn.state(["!disabled"]), self.upd_msg.config(text=str(e), foreground=BAD)))
+
     def done(self):
         return self.app.bot_running()
 
 
-STEPS = [WelcomeStep, TelegramStep, ChannelStep, MT5Step, TradingStep, ScheduleStep,
+STEPS = [WelcomeStep, TelegramStep, ChannelStep, MT5Step, TradingStep, ScheduleStep, ProtectionsStep,
          AlertsStep, TestStep, BacktestStep, StartupStep, PanelStep]
 
 
@@ -1246,6 +1585,8 @@ class App(tk.Tk):
         self.geometry("1080x800")
         self.minsize(1000, 740)
         self.settings = sl.load_settings(data_dir() / "config.ini")
+        self.restart_requested = False
+        apply_palette(resolve_theme(self.settings.theme))        # antes de crear cualquier widget
         self.tg = None
         self.tg_user: Optional[str] = None
         self.mt5_info: Optional[dict] = None
@@ -1302,27 +1643,27 @@ class App(tk.Tk):
                    darkcolor=[("disabled", dis_bg), ("pressed", press), ("active", hover)])
         # Secundario (por defecto): fondo claro + texto oscuro
         # (fondo gris claro + borde visible: se distingue como botón sobre el fondo blanco)
-        button("TButton", "#f4f6fb", TEXT, "#9aa6c0", "#e4e9f5", "#d6ddee", "#f4f6fa", "#6f788d",
-               font=self.font_base, bevel="#9aa6c0")
+        button("TButton", B2_BG, TEXT, B2_BORDER, B2_HOVER, B2_PRESS, B2_DIS_BG, B2_DIS_FG,
+               font=self.font_base, bevel=B2_BORDER)
         # Principal: azul + texto blanco
-        button("Accent.TButton", ACCENT, "#ffffff", ACCENT, ACCENT_DK, ACCENT_PR, "#dfe5f5", "#6b7fb5")
+        button("Accent.TButton", ACCENT, "#ffffff", ACCENT, ACCENT_DK, ACCENT_PR, B1_DIS_BG, B1_DIS_FG)
         # Peligro: rojo + texto blanco
-        button("Danger.TButton", BAD, "#ffffff", BAD, "#a82a19", "#8f2214", "#f6dcd8", "#b0675d")
+        button("Danger.TButton", DANGER, "#ffffff", DANGER, BD_HOVER, BD_PRESS, BD_DIS_BG, BD_DIS_FG)
         # Pequeño (Mostrar/Ocultar)
-        button("Small.TButton", "#f4f6fb", ACCENT_DK, "#9aa6c0", "#e4e9f5", "#d6ddee", "#f4f6fa", "#6f788d",
-               pad=(8, 4), font=self.font_base, bevel="#9aa6c0")
+        button("Small.TButton", B2_BG, LINK, B2_BORDER, B2_HOVER, B2_PRESS, B2_DIS_BG, B2_DIS_FG,
+               pad=(8, 4), font=self.font_base, bevel=B2_BORDER)
 
         for w in ("TEntry", "TCombobox", "TSpinbox"):
-            st.configure(w, fieldbackground="#ffffff", background="#ffffff", foreground=TEXT,
+            st.configure(w, fieldbackground=FIELD, background=FIELD, foreground=TEXT,
                          bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, insertcolor=TEXT,
                          padding=(8, 6), arrowcolor=MUTED, arrowsize=14,
-                         selectbackground="#dbe6ff", selectforeground=TEXT)
-            st.map(w, bordercolor=[("focus", ACCENT), ("hover", "#aab4cc")],
+                         selectbackground=SEL, selectforeground=TEXT)
+            st.map(w, bordercolor=[("focus", ACCENT), ("hover", HOVER_BORDER)],
                    lightcolor=[("focus", ACCENT)], darkcolor=[("focus", ACCENT)],
-                   fieldbackground=[("disabled", "#f1f3f8"), ("readonly", "#ffffff")],
-                   foreground=[("disabled", "#98a1b3")],
-                   selectbackground=[("readonly", "#ffffff")], selectforeground=[("readonly", TEXT)])
-        self.option_add("*TCombobox*Listbox.background", "#ffffff")
+                   fieldbackground=[("disabled", BAR), ("readonly", FIELD)],
+                   foreground=[("disabled", DIS_FG)],
+                   selectbackground=[("readonly", FIELD)], selectforeground=[("readonly", TEXT)])
+        self.option_add("*TCombobox*Listbox.background", FIELD)
         self.option_add("*TCombobox*Listbox.foreground", TEXT)
         self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
         self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
@@ -1330,36 +1671,41 @@ class App(tk.Tk):
 
         for w in ("TCheckbutton", "TRadiobutton"):
             # indicador grande y con borde oscuro (el gris claro por defecto casi no se veía)
-            st.configure(w, background=BG, foreground=TEXT, indicatorbackground="#ffffff",
-                         indicatorforeground="#ffffff", upperbordercolor="#7d89a6", lowerbordercolor="#7d89a6",
+            st.configure(w, background=BG, foreground=TEXT, indicatorbackground=FIELD,
+                         indicatorforeground=FIELD, upperbordercolor=IND_BORDER, lowerbordercolor=IND_BORDER,
                          indicatorsize=18, indicatormargin=(2, 2, 8, 2), padding=(2, 4))
-            st.map(w, background=[("active", BG)], foreground=[("disabled", "#98a1b3")],
-                   indicatorbackground=[("selected", ACCENT), ("pressed", "#e1e7f3")],
+            st.map(w, background=[("active", BG)], foreground=[("disabled", DIS_FG)],
+                   indicatorbackground=[("selected", ACCENT), ("pressed", IND_PRESS)],
                    indicatorforeground=[("selected", "#ffffff")])
         # círculo elegido = punto azul en el centro con borde azul
-        st.map("TRadiobutton", indicatorbackground=[("selected", "#ffffff"), ("pressed", "#e1e7f3")],
+        st.map("TRadiobutton", indicatorbackground=[("selected", FIELD), ("pressed", IND_PRESS)],
                indicatorforeground=[("selected", ACCENT)],
                upperbordercolor=[("selected", ACCENT)], lowerbordercolor=[("selected", ACCENT)])
         st.configure("TLabelframe", background=BG, bordercolor=BORDER, relief="solid", borderwidth=1)
         st.configure("TLabelframe.Label", background=BG, foreground=TEXT, font=self.font_bold)
 
-        st.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=TEXT,
+        st.configure("Treeview", background=FIELD, fieldbackground=FIELD, foreground=TEXT,
                      rowheight=28, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, borderwidth=1)
-        st.map("Treeview", background=[("selected", "#dbe6ff")], foreground=[("selected", TEXT)])
+        st.map("Treeview", background=[("selected", SEL)], foreground=[("selected", TEXT)])
         st.configure("Treeview.Heading", background=BAR, foreground=TEXT, font=self.font_bold, relief="flat",
                      padding=(8, 6), bordercolor=BORDER, lightcolor=BAR, darkcolor=BAR)
-        st.map("Treeview.Heading", background=[("active", "#e8ecf5")])
-        st.configure("Vertical.TScrollbar", background="#c9d0de", troughcolor=BAR, bordercolor=BAR,
-                     arrowcolor=MUTED, lightcolor="#c9d0de", darkcolor="#c9d0de")
-        st.map("Vertical.TScrollbar", background=[("active", "#aab4cc")])
-        st.configure("Horizontal.TProgressbar", troughcolor="#e6eaf2", background=ACCENT, bordercolor="#e6eaf2",
+        st.map("Treeview.Heading", background=[("active", HEAD_HOVER)])
+        st.configure("Vertical.TScrollbar", background=SCROLL, troughcolor=BAR, bordercolor=BAR,
+                     arrowcolor=MUTED, lightcolor=SCROLL, darkcolor=SCROLL)
+        st.map("Vertical.TScrollbar", background=[("active", SCROLL_HOVER)])
+        st.configure("TNotebook", background=BG, bordercolor=BORDER, tabmargins=(0, 4, 0, 0))
+        st.configure("TNotebook.Tab", background=BAR, foreground=MUTED, padding=(16, 8), bordercolor=BORDER,
+                     font=self.font_base)
+        st.map("TNotebook.Tab", background=[("selected", BG), ("active", HEAD_HOVER)],
+               foreground=[("selected", TEXT)], padding=[("selected", (16, 8))])
+        st.configure("Horizontal.TProgressbar", troughcolor=TROUGH, background=ACCENT, bordercolor=TROUGH,
                      lightcolor=ACCENT, darkcolor=ACCENT)
         st.configure("TSeparator", background=BORDER)
 
         # Cuadros de texto (tk): borde fino, relleno interior y selección legible
-        for opt, val in (("background", "#ffffff"), ("foreground", TEXT), ("relief", "flat"),
+        for opt, val in (("background", FIELD), ("foreground", TEXT), ("relief", "flat"),
                          ("highlightThickness", 1), ("highlightBackground", BORDER), ("highlightColor", ACCENT),
-                         ("padX", 10), ("padY", 8), ("selectBackground", "#dbe6ff"), ("selectForeground", TEXT),
+                         ("padX", 10), ("padY", 8), ("selectBackground", SEL), ("selectForeground", TEXT),
                          ("insertBackground", TEXT)):
             self.option_add(f"*Text.{opt}", val)
         self.configure(bg=BG)
@@ -1371,7 +1717,7 @@ class App(tk.Tk):
         self.side.pack_propagate(False)
         tk.Label(self.side, text="AutoTrade", bg=SIDEBAR, fg="#ffffff", font=self.font_big, anchor="w").pack(
             fill="x", padx=20, pady=(22, 0))
-        tk.Label(self.side, text="Señales de Telegram → MT5", bg=SIDEBAR, fg="#8d99b3", font=self.font_base,
+        tk.Label(self.side, text="Señales de Telegram → MT5", bg=SIDEBAR, fg=SIDE_SUB, font=self.font_base,
                  anchor="w").pack(fill="x", padx=20, pady=(2, 18))
         self.side_rows, self.side_chips, self.side_labels, self.side_bars = [], [], [], []
         for i, cls in enumerate(STEPS):
@@ -1379,9 +1725,9 @@ class App(tk.Tk):
             row.pack(fill="x")
             bar = tk.Frame(row, width=4, bg=SIDEBAR)
             bar.pack(side="left", fill="y")
-            chip = tk.Label(row, text=str(i + 1), width=3, bg="#38435c", fg="#ffffff", font=self.font_small)
+            chip = tk.Label(row, text=str(i + 1), width=3, bg=CHIP, fg="#ffffff", font=self.font_small)
             chip.pack(side="left", padx=(14, 12), pady=9)
-            lab = tk.Label(row, text="", anchor="w", bg=SIDEBAR, fg="#aab4cc", font=self.font_base)
+            lab = tk.Label(row, text="", anchor="w", bg=SIDEBAR, fg=SIDE_TEXT, font=self.font_base)
             lab.pack(side="left", fill="x", expand=True)
             for w in (row, bar, chip, lab):
                 w.bind("<Button-1>", lambda e, i=i: self.goto(i))
@@ -1399,15 +1745,17 @@ class App(tk.Tk):
         head.pack(fill="x", padx=34, pady=(20, 0))
         self.crumb = tk.Label(head, text="", bg=BG, fg=MUTED, font=self.font_small, anchor="w")
         self.crumb.pack(fill="x")
-        self.progress = tk.Canvas(head, height=4, bg="#e6eaf2", highlightthickness=0)
+        self.progress = tk.Canvas(head, height=4, bg=TROUGH, highlightthickness=0)
         self.progress.pack(fill="x", pady=(6, 0))
         self.progress.bind("<Configure>", lambda e: self._draw_progress())
+        # La barra de navegación se reserva primero (abajo): si un paso crece, se recorta el contenido,
+        # nunca los botones «Atrás» / «Siguiente».
+        nav = ttk.Frame(right, style="Bar.TFrame", padding=(34, 12))
+        nav.pack(side="bottom", fill="x")
+        ttk.Separator(right, orient="horizontal").pack(side="bottom", fill="x")
         self.body = ttk.Frame(right, padding=(34, 16, 34, 6))
         self.body.pack(fill="both", expand=True)
         self.steps = [cls(self, self.body) for cls in STEPS]
-        ttk.Separator(right, orient="horizontal").pack(fill="x")
-        nav = ttk.Frame(right, style="Bar.TFrame", padding=(34, 12))
-        nav.pack(fill="x")
         self.back_btn = ttk.Button(nav, text="←  Atrás", command=lambda: self.goto(self.index - 1))
         self.back_btn.pack(side="left")
         self.next_btn = ttk.Button(nav, text="Siguiente  →", style="Accent.TButton",
@@ -1466,13 +1814,13 @@ class App(tk.Tk):
             cur = i == self.index
             done = i in self.visited and not cur and self.steps[i].done()
             row_bg = SIDE_ACTIVE if cur else SIDEBAR
-            chip_bg = ACCENT if cur else ("#1f9d63" if done else "#38435c")
+            chip_bg = ACCENT if cur else (CHIP_DONE if done else CHIP)
             self.side_chips[i].config(text="✔" if done else str(i + 1), bg=chip_bg)
             self.side_labels[i].config(text=self.steps[i].short, bg=row_bg,
-                                       fg="#ffffff" if cur else ("#dfe5f3" if done else "#aab4cc"),
+                                       fg="#ffffff" if cur else (SIDE_DONE if done else SIDE_TEXT),
                                        font=self.font_bold if cur else self.font_base)
             self.side_rows[i].config(bg=row_bg)
-            self.side_bars[i].config(bg="#7aa2ff" if cur else row_bg)
+            self.side_bars[i].config(bg=SIDE_BAR if cur else row_bg)
 
     # ---- ajustes
     def sync_settings(self) -> Settings:
@@ -1575,6 +1923,15 @@ class App(tk.Tk):
         except Exception as e:  # noqa: BLE001
             messagebox.showinfo("No se pudo abrir", f"{p}\n\n{e}")
 
+    def restart(self, save: bool = True):
+        """Cierra y vuelve a abrir la ventana (para aplicar el tema o una copia restaurada)."""
+        self.restart_requested = True
+        if save:
+            self.sync_settings()
+            self.save()
+        self.close_tg()
+        self.destroy()
+
     def on_close(self):
         if self.bot_running():
             r = messagebox.askyesnocancel(
@@ -1594,5 +1951,8 @@ class App(tk.Tk):
 
 
 def run_gui() -> int:
-    App().mainloop()
-    return 0
+    while True:
+        app = App()
+        app.mainloop()
+        if not app.restart_requested:
+            return 0

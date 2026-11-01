@@ -24,6 +24,27 @@ Lee un canal de Telegram con tu cuenta, interpreta las señales y las opera en t
 
 > **Qué se probó y qué no.** La interfaz y toda la lógica del asistente están cubiertas por pruebas automáticas (con Telegram y MT5 simulados) y se revisó visualmente en pantalla; el paquete se compiló y ejecutó en Linux para comprobar que incluye todos los módulos. **No se pudo probar en Windows**: la compilación del `.exe`, el instalador de Inno Setup, el inicio automático y la conexión real con tu Telegram y tu MetaTrader 5 son lo primero que debes verificar (en simulación y con una cuenta demo).
 
+## Protecciones, control y seguimiento (v1.1)
+
+Todo es opcional y se configura en el paso **«Protecciones»** del asistente (0 / «desactivado» = sin límite).
+
+| Función | Cómo funciona |
+|---|---|
+| **Límite de pérdida diaria** | Si la pérdida del día (cerrado + flotante, solo de las operaciones del programa) llega a X % del saldo con que empezó el día, no se abren más señales hoy y te avisa. Opcional: cerrar también lo abierto. El día se cuenta en tu zona horaria. Se reactiva solo al día siguiente. |
+| **Máximo de señales por día** | Mismo corte, por cantidad de señales operadas. |
+| **Filtro de spread** | No abre la señal si el spread (ask − bid) supera X USD. |
+| **Filtro de noticias** | *Manual*: tú escribes las horas (`Fri 08:30 NFP; Wed 14:00 FOMC`) y no se abre nada X min antes/después. *Automático*: además descarga un calendario económico público (noticias de impacto alto de las monedas que elijas); si la descarga falla usa la última copia y **nunca bloquea por un error de red**. |
+| **Break-even automático** | Cuando se cierra la orden del TP1 de una señal y quedan otras de la misma señal, mueve su SL a la entrada (solo si ya están en ganancia, respetando la distancia mínima del broker). |
+| **Pausa** | Botón «Pausar señales» del panel, o `/pausa` por Telegram. Pausar no abre señales nuevas pero **sigue gestionando** lo abierto (BE, cerrar…). También por canal (`/pausa 2`). |
+| **Control por Telegram** | Escribe en tu chat «Mensajes guardados»: `/estado`, `/canales`, `/pausa [n]`, `/reanudar [n]`, `/cerrar` (pide confirmar con `/cerrar confirmar` en 60 s), `/ayuda`. Solo se atienden tus propios mensajes en ese chat. |
+| **Bandeja de señales** | Pestaña «Señales» del panel: cada mensaje de tus canales con lo que se decidió (operada, ignorada y por qué, comando, error). Si un mensaje **parece una señal pero no se entendió** aparece como «Revisar» y te llega un aviso, en vez de ignorarse en silencio. |
+| **Rendimiento por canal** | Pestaña «Rendimiento»: resultado real (hoy / 7 / 30 días / total, con comisiones y swaps) de cada canal, leído del historial de MT5. |
+| **Tema claro / oscuro** | Panel → «Más». «Automático» sigue el modo de Windows. |
+| **Copia de seguridad** | Panel → «Más»: guarda/restaura `config.ini` (y, si lo pides, la sesión de Telegram, que da acceso a tu cuenta). |
+| **Aviso de versión** | Panel → «Más» → «Buscar actualizaciones» (consulta la última *Release* de GitHub; si no hay ninguna publicada, lo dice). |
+
+Notas honestas: el límite diario se evalúa cada vez que llega una señal y cada 30 s; el rendimiento en simulación aparece vacío (no hay operaciones); el calendario automático usa una fuente pública de terceros cuyo formato no se pudo comprobar desde el entorno de desarrollo (por eso el modo manual es el garantizado); y el break-even automático olvida el seguimiento si se reinicia el programa a mitad de una señal (el BE por mensaje del canal sigue funcionando).
+
 ## Qué hace
 
 | Mensaje del canal | Acción |

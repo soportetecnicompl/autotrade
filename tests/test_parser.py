@@ -1,6 +1,6 @@
 import unittest
 
-from autotrade.parser import parse
+from autotrade.parser import looks_like_signal, parse
 from autotrade.planner import OrderPlan, Skip, apply_stops_level, plan_orders
 
 
@@ -110,6 +110,18 @@ class PlannerTests(unittest.TestCase):
             self.plan("XAUUSD BUY 2650 SL 2640")
         p = self.plan("XAUUSD BUY 2650 SL 2640", allow_no_tp=True)
         self.assertEqual(p[0].tp, 0.0)
+
+
+class LooksLikeSignalTests(unittest.TestCase):
+    def test_unparsed_but_signal_shaped_messages_are_flagged(self):
+        for t in ("Buy gold around 3905 now", "SELL XAUUSD 3930 ahora", "compra oro 3900", "Vender 3912 zona"):
+            self.assertFalse(parse(t).signal, t)                       # el lector no las entiende...
+            self.assertTrue(looks_like_signal(t), t)                   # ...pero parecen señales: hay que avisar
+
+    def test_chatter_and_real_signals(self):
+        for t in ("Buenos días equipo", "Great week! 250 pips 🔥", "Not miss again", "Sell the rumor, buy the news"):
+            self.assertFalse(looks_like_signal(t), t)
+        self.assertTrue(looks_like_signal("SELL GOLD 3912 SL 3932 TP 3902"))   # una señal real también «parece» señal
 
 
 class StopsLevelPureTests(unittest.TestCase):

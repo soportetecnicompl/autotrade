@@ -82,6 +82,29 @@ class RiskTests(unittest.TestCase):
         self.assertEqual(RiskGuard(g.path).state.day, "")
 
 
+class RiskExternalOverrideTests(unittest.TestCase):
+    def test_bot_adopts_resume_written_by_the_panel_in_another_process(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "risk.json"
+            bot = RiskGuard(path, loss_pct=1.0, tz_hours=0)
+            bot.check(utc(2026, 11, 5, 15), 1000, 0, 0)
+            self.assertFalse(bot.check(utc(2026, 11, 5, 15, 5), 980, -20, 0).allowed)
+            RiskGuard(path, loss_pct=1.0, tz_hours=0).resume()                # el panel (otro proceso)
+            v = bot.check(utc(2026, 11, 5, 15, 10), 980, -20, 0)
+            self.assertTrue(v.allowed)
+            self.assertFalse(bot.state.tripped)
+
+    def test_override_from_a_previous_day_is_not_adopted(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "risk.json"
+            old = RiskGuard(path, loss_pct=1.0, tz_hours=0)
+            old.check(utc(2026, 11, 4, 15), 1000, 0, 0)
+            old.resume()                                                       # override de AYER en el archivo
+            bot = RiskGuard(path, loss_pct=1.0, tz_hours=0)
+            bot.check(utc(2026, 11, 5, 15), 1000, 0, 0)                        # hoy: día nuevo, estado limpio
+            self.assertFalse(bot.check(utc(2026, 11, 5, 15, 5), 980, -20, 0).allowed)
+
+
 class ControlAndLogTests(unittest.TestCase):
     def test_pause_global_and_per_channel(self):
         with tempfile.TemporaryDirectory() as d:
@@ -323,6 +346,51 @@ class BackupTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 backup.import_zip(D / "n.zip", D)
             self.assertFalse((D.parent / "evil.txt").exists())
+
+
+class FetchDealsTests(unittest.TestCase):
+    """mt5_helper.fetch_deals con un MT5 falso."""
+
+    def fake(self, deals, init=True, tick_time=1_700_000_000 + 2 * 3600 + 30):
+        from tests.fake_mt5 import FakeMT5, NS
+        f = FakeMT5()
+        f.tick = NS(bid=2650.0, ask=2650.3, time=tick_time)
+        f.deals = deals
+        f.initialize = lambda **kw: init
+        f.symbol_select = lambda s, v: True
+        f.symbol_info_tick = lambda s: f.tick
+        f.history_deals_get = lambda a, b: (f.range.append((a, b)) or f.deals)
+        f.range = []
+        f.DEAL_ENTRY_IN, f.DEAL_ENTRY_OUT, f.DEAL_ENTRY_INOUT = 0, 1, 2
+        return f
+
+    def run_fetch(self, fake, **kw):
+        from unittest import mock
+        from autotrade import mt5_helper
+        with mock.patch("autotrade.mt5_import.import_mt5", return_value=fake), \
+             mock.patch("time.time", return_value=1_700_000_000.0):
+            return mt5_helper.fetch_deals(symbol="XAUUSD", magic=777, **kw)
+
+    def test_filters_by_magic_maps_entries_and_estimates_offset(self):
+        from tests.fake_mt5 import NS
+        mk = lambda **k: NS(**{"position_id": 1, "entry": 0, "time": 1, "profit": 0.0, "swap": 0.0, "commission": 0.0,
+                               "fee": 0.0, "comment": "", "magic": 777, **k})
+        f = self.fake([mk(entry=0, comment="tg1.5:1"), mk(entry=1, profit=9.5), mk(entry=2, profit=1.0),
+                       mk(magic=1, entry=1, profit=999.0), mk(entry=3, profit=2.0)])
+        r = self.run_fetch(f, days=30)
+        self.assertTrue(r["ok"])
+        self.assertEqual([d["entry"] for d in r["deals"]], ["in", "out", "inout", "out"])   # el de otro magic no está; el cierre «por contraria» (3) cuenta como salida
+        self.assertEqual(r["server_offset"], 2 * 3600)                                         # servidor UTC+2
+        a, b = f.range[0]
+        self.assertAlmostEqual((b - a) / 86400, 30.0 + 1 / 24, places=6)                       # 30 días + 1 h de margen
+
+    def test_errors_are_reported(self):
+        r = self.run_fetch(self.fake([], init=False))
+        self.assertFalse(r["ok"])
+        self.assertIn("No se pudo conectar", r["error"])
+        f = self.fake([])
+        f.history_deals_get = lambda a, b: None
+        self.assertIn("no devolvió historial", self.run_fetch(f)["error"])
 
 
 class UpdateTests(unittest.TestCase):

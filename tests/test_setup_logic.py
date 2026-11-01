@@ -63,6 +63,43 @@ class ConfigTests(unittest.TestCase):
                           for c in cfg["channels"]],
                          [(1, "-1001", True, 0.0, 0), (3, "@goldpro", False, 0.05, 3), (7, "-1009", True, 0.01, 1)])
 
+    def test_protections_roundtrip_and_validation(self):
+        s = good()
+        s.auto_be, s.daily_loss_limit_pct, s.max_signals_per_day, s.close_on_limit = True, 2.5, 4, True
+        s.max_spread_usd, s.news_mode, s.news_minutes_before, s.news_minutes_after = 0.8, "auto", 20, 10
+        s.news_manual, s.news_currencies, s.theme = "Fri 08:30 NFP; Wed 14:00 FOMC", "USD, EUR", "dark"
+        back, cfg = self.roundtrip(s)
+        self.assertEqual(back, s)                                         # incluye la lista de noticias con «;»
+        self.assertEqual((cfg["auto_be"], cfg["daily_loss_limit_pct"], cfg["max_signals_per_day"], cfg["close_on_limit"]),
+                         (True, 2.5, 4, True))
+        self.assertEqual((cfg["max_spread_usd"], cfg["news_mode"], cfg["news_before"], cfg["news_after"]), (0.8, "auto", 20, 10))
+        self.assertEqual((cfg["news_manual"], cfg["news_currencies"]), ("Fri 08:30 NFP; Wed 14:00 FOMC", ["USD", "EUR"]))
+        self.assertEqual(sl.validate_protections(s), [])
+        bad = good()
+        bad.daily_loss_limit_pct, bad.max_spread_usd, bad.news_mode = 80.0, -1.0, "siempre"
+        bad.news_minutes_before, bad.theme = 999, "morado"
+        self.assertEqual(len(sl.validate_protections(bad)), 5)
+        m = good()
+        m.news_mode, m.news_manual = "manual", ""
+        self.assertTrue(any("al menos una noticia" in e for e in sl.validate_protections(m)))
+        m.news_manual = "viernes a las 8"
+        self.assertTrue(any("Noticias manuales" in e for e in sl.validate_protections(m)))
+        a = good()
+        a.news_mode, a.news_currencies = "auto", "dólar"
+        self.assertTrue(any("monedas" in e.lower() for e in sl.validate_protections(a)))
+
+    def test_old_config_without_new_sections_gets_safe_defaults(self):
+        old = ("[telegram]\napi_id = 1\napi_hash = a\nchannel = @viejo\n[mt5]\n[trading]\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.ini"
+            p.write_text(old, encoding="utf-8")
+            cfg = bot_main.load_config(str(p))
+            self.assertEqual((cfg["daily_loss_limit_pct"], cfg["max_spread_usd"], cfg["news_mode"], cfg["auto_be"]),
+                             (0.0, 0.0, "off", False))                    # todo apagado por defecto
+            s = sl.load_settings(p)
+            self.assertEqual((s.theme, s.news_mode, s.close_on_limit), ("auto", "off", False))
+            self.assertEqual(sl.validate_protections(s), [])
+
     def test_old_single_channel_config_still_loads(self):
         old = ("[telegram]\napi_id = 1\napi_hash = a\nchannel = @viejo\nchannel_title = Canal viejo\n"
                "[mt5]\n[trading]\n")
