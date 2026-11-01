@@ -82,6 +82,12 @@ En `dry_run` todos los avisos llevan el prefijo `[DRY-RUN]`. El bot revisa MT5 c
 
 > Los scripts de Windows (`.bat` y `.ps1`) no pudieron ejecutarse en el entorno donde se desarrollaron (Linux). Pruébalos primero con el bot en `dry_run`.
 
+## Órdenes rechazadas: reintentos y distancia mínima
+
+- **Requote / precio cambiado** (códigos 10004, 10020, 10021): en órdenes a mercado el bot reintenta con el precio actual hasta `requote_retries` veces. Al **abrir**, si el precio empeora más de `retry_max_slippage` USD respecto al de la señal, cancela y te avisa (no persigue el mercado). Un precio que mejora se acepta. Los **cierres** reintentan sin ese límite, porque cerrar importa más que el precio.
+- **Distancia mínima del broker** (*stops level*): antes de enviar, el bot revisa que SL y TP (y las pendientes respecto al precio) cumplan el mínimo del símbolo, midiéndolo como MT5. Con `stops_policy = skip` (por defecto) la señal no se opera y te avisa; con `adjust` aleja el SL/TP hasta el mínimo, lo que cambia el riesgo u objetivo de la señal, y te lo avisa. El break-even y "mover SL" también respetan ese mínimo y avisan si no pueden aplicarse.
+- Todo lo demás (margen insuficiente, mercado cerrado, Algo Trading apagado...) se rechaza igual y llega como aviso ❌ con el código de MT5.
+
 ## Filtro de horario
 
 En `config.ini`, sección `[filters]`, limitas en qué días y horas se aceptan señales **nuevas**:

@@ -8,7 +8,8 @@ from tests.fake_mt5 import FakeMT5, NS, position, symbol_info
 
 CFG = dict(dry_run=False, symbol="XAUUSD", magic=777, deviation=30, lot_size=0.02,
            risk_percent=0.0, max_tps=2, max_open_positions=6, market_tolerance=1.5,
-           max_pending_distance=30.0, pending_expiry_min=60, allow_no_tp=False, be_offset=0.0)
+           max_pending_distance=30.0, pending_expiry_min=60, allow_no_tp=False, be_offset=0.0,
+           requote_retries=3, retry_delay_ms=0, retry_max_slippage=1.0, stops_policy="skip")
 
 
 def make(fake=None, **over):
@@ -78,6 +79,92 @@ class OpenSignalTests(unittest.TestCase):
         t = make(lot_size=0.01)
         self.assertEqual(t.open_signal(parse("SELL GOLD 2650 SL 2662 TP1 2640 TP2 2630").signal, 1), 1)
         self.assertEqual(t.mt5.sent[0]["tp"], 2640.0)
+
+
+SELL = "SELL GOLD 2650 SL 2662 TP 2640"
+BUY = "BUY GOLD 2650 SL 2640 TP 2660"
+
+
+class RetryTests(unittest.TestCase):
+    def test_requote_retries_with_fresh_price(self):
+        f = FakeMT5(retcodes=[10004, 10020])               # 2 requotes y luego DONE
+        f.tick_after = [(2649.8, 2650.1), (2649.7, 2650.0)]
+        t = make(f)
+        self.assertEqual(t.open_signal(parse(SELL).signal, 1), 1)
+        self.assertEqual([r["price"] for r in f.sent], [2650.0, 2649.8, 2649.7])
+        self.assertTrue(any("tras 2 reintento" in m for _, m in t.msgs))
+
+    def test_requote_adverse_move_aborts_open(self):
+        f = FakeMT5(retcodes=[10004])
+        f.tick_after = [(2648.0, 2648.3)]                  # SELL: precio 2 USD peor (bid más bajo)
+        t = make(f)
+        self.assertEqual(t.open_signal(parse(SELL).signal, 1), 0)
+        self.assertEqual(len(f.sent), 1)                   # no reintentó
+        self.assertTrue(any("NO ejecutada" in m for l, m in t.msgs if l == "error"))
+
+    def test_favorable_move_is_accepted(self):
+        f = FakeMT5(retcodes=[10004])
+        f.tick_after = [(2651.5, 2651.8)]                  # SELL: precio mejor
+        t = make(f)
+        self.assertEqual(t.open_signal(parse(SELL).signal, 1), 1)
+        self.assertEqual(f.sent[1]["price"], 2651.5)
+
+    def test_retries_are_limited(self):
+        f = FakeMT5(retcodes=[10004] * 10)
+        t = make(f, requote_retries=2)
+        self.assertEqual(t.open_signal(parse(SELL).signal, 1), 0)
+        self.assertEqual(len(f.sent), 3)                   # 1 intento + 2 reintentos
+        self.assertTrue(any("FALLÓ" in m for _, m in t.msgs))
+
+    def test_close_is_not_blocked_by_slippage_guard(self):
+        f = FakeMT5(retcodes=[10004])
+        f.tick_after = [(2640.0, 2640.3)]                  # cierre de SELL: ask 10 USD distinto
+        t = make(f)
+        f.pos = [position(11, "SELL", 2650, volume=0.01)]
+        t.handle_command(Command("close"), None)
+        self.assertEqual(len(f.sent), 2)
+        self.assertEqual(f.sent[1]["price"], 2640.3)
+
+    def test_no_retry_when_disabled(self):
+        f = FakeMT5(retcodes=[10004])
+        self.assertEqual(make(f, requote_retries=0).open_signal(parse(SELL).signal, 1), 0)
+        self.assertEqual(len(f.sent), 1)
+
+
+class StopsLevelTests(unittest.TestCase):
+    def make_lvl(self, level, **over):
+        t = make(**over)
+        t.si = symbol_info(stops_level=level)              # 300 puntos = 3.00 USD
+        return t
+
+    def test_skip_when_sl_too_close(self):
+        t = self.make_lvl(300)
+        sig = parse("SELL GOLD 2650 SL 2652 TP 2640").signal      # SL a 2.30 del ask 2650.3
+        self.assertEqual(t.open_signal(sig, 1), 0)
+        self.assertEqual(t.mt5.sent, [])
+        self.assertEqual(t.msgs[-1][0], "warn")
+        self.assertIn("demasiado cerca", t.msgs[-1][1])
+
+    def test_adjust_moves_levels_and_warns(self):
+        t = self.make_lvl(300, stops_policy="adjust")
+        sig = parse("SELL GOLD 2650 SL 2652 TP 2640").signal
+        self.assertEqual(t.open_signal(sig, 1), 1)
+        r = t.mt5.sent[0]
+        self.assertAlmostEqual(r["sl"], round(2650.3 + 3.01, 2))  # SELL: ref = ask
+        self.assertEqual(r["tp"], 2640.0)
+        self.assertTrue(any("ajustados" in m for l, m in t.msgs if l == "warn"))
+
+    def test_ok_when_far_enough(self):
+        t = self.make_lvl(300)
+        self.assertEqual(t.open_signal(parse(SELL).signal, 1), 1)
+
+    def test_be_skipped_when_too_close_to_price(self):
+        f = FakeMT5(bid=2650.5, ask=2650.8)                # precio apenas pasó la entrada
+        t = make(f); t.si = symbol_info(stops_level=300)
+        f.pos = [position(11, "BUY", 2650, sl=2640, tp=2670)]
+        t.handle_command(Command("breakeven"), None)       # SL 2650: bid - sl = 0.50 < 3.00
+        self.assertEqual(f.sent, [])
+        self.assertTrue(any("no se movió el SL" in m for l, m in t.msgs if l == "warn"))
 
 
 class CommandTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 import unittest
 
 from autotrade.parser import parse
-from autotrade.planner import Skip, plan_orders
+from autotrade.planner import OrderPlan, Skip, apply_stops_level, plan_orders
 
 
 class ParserTests(unittest.TestCase):
@@ -110,6 +110,34 @@ class PlannerTests(unittest.TestCase):
             self.plan("XAUUSD BUY 2650 SL 2640")
         p = self.plan("XAUUSD BUY 2650 SL 2640", allow_no_tp=True)
         self.assertEqual(p[0].tp, 0.0)
+
+
+class StopsLevelPureTests(unittest.TestCase):
+    def test_market_uses_close_side_price(self):
+        # BUY: SL/TP se miden contra el bid (2650.0), no contra el ask
+        ok = [OrderPlan("BUY", "market", 2650.3, 2646.9, 2653.1)]
+        self.assertEqual(apply_stops_level(ok, 2650.0, 2650.3, 3.0)[1], [])
+        with self.assertRaises(Skip):
+            apply_stops_level([OrderPlan("BUY", "market", 2650.3, 2647.1, 2660)], 2650.0, 2650.3, 3.0)
+
+    def test_tp_too_close_and_adjust(self):
+        p = [OrderPlan("SELL", "market", 2650.0, 2662.0, 2648.0)]   # TP a 2.3 del ask 2650.3
+        with self.assertRaises(Skip):
+            apply_stops_level(p, 2650.0, 2650.3, 3.0)
+        out, notes = apply_stops_level(p, 2650.0, 2650.3, 3.0, "adjust")
+        self.assertAlmostEqual(out[0].tp, 2650.3 - 3.01)
+        self.assertEqual(out[0].sl, 2662.0)
+        self.assertEqual(len(notes), 1)
+
+    def test_pending_too_close_always_skipped(self):
+        p = [OrderPlan("BUY", "limit", 2649.0, 2640.0, 2660.0)]     # a 1.3 del ask
+        for pol in ("skip", "adjust"):
+            with self.assertRaises(Skip):
+                apply_stops_level(p, 2648.7, 2650.3, 3.0, pol)
+
+    def test_zero_level_changes_nothing(self):
+        p = [OrderPlan("BUY", "market", 2650.3, 2650.0, 2650.5)]
+        self.assertEqual(apply_stops_level(p, 2650.0, 2650.3, 0.0), (p, []))
 
 
 if __name__ == "__main__":

@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import List, Optional
 
 from .parser import Command, Signal
-from .planner import OrderPlan, Skip, plan_orders
+from .planner import OrderPlan, Skip, apply_stops_level, plan_orders
 
 log = logging.getLogger("trader")
 
@@ -113,6 +114,10 @@ class Trader:
     def orders(self, msg_id: Optional[int] = None):
         return self._mine(self.mt5.orders_get(symbol=self.symbol), msg_id)
 
+    def min_stop_distance(self) -> float:
+        """Distancia mínima (USD) entre precio y SL/TP que exige el broker."""
+        return float(getattr(self.si, "trade_stops_level", 0) or 0) * self.si.point
+
     def _norm_volume(self, vol: float) -> float:
         step, vmin, vmax = self.si.volume_step, self.si.volume_min, self.si.volume_max
         vol = math.floor(vol / step + 1e-9) * step
@@ -152,29 +157,62 @@ class Trader:
         modes.append(m.ORDER_FILLING_RETURN)
         return modes
 
-    def _send(self, req: dict, label: str) -> bool:
+    def _send(self, req: dict, label: str, guard: bool = False) -> bool:
+        """Envía la solicitud. Ante requote / precio cambiado en órdenes a mercado
+        reintenta con el precio actual (hasta `requote_retries`). Con guard=True
+        (aperturas) aborta si el precio empeoró más de `retry_max_slippage` USD
+        respecto al precio original; los cierres no se bloquean por eso."""
         if self.dry_run:
             log.info("[DRY-RUN] %s -> %s", label, req)
             return True
         m = self.mt5
-        for filling in (self._fillings() if req["action"] == m.TRADE_ACTION_DEAL
-                        else [m.ORDER_FILLING_RETURN]):
-            req = {**req, "type_filling": filling}
+        is_deal = req["action"] == m.TRADE_ACTION_DEAL
+        fillings = self._fillings() if is_deal else [m.ORDER_FILLING_RETURN]
+        retries = self.cfg["requote_retries"] if is_deal else 0
+        requote = {m.TRADE_RETCODE_REQUOTE, m.TRADE_RETCODE_PRICE_CHANGED,
+                   m.TRADE_RETCODE_PRICE_OFF}
+        orig_price, attempt, fi = req.get("price"), 0, 0
+        while fi < len(fillings):
+            req = {**req, "type_filling": fillings[fi]}
             res = m.order_send(req)
             if res is None:
                 log.error("%s: order_send devolvió None (%s)", label, m.last_error())
                 self.notify(f"❌ {label}: MT5 no respondió ({m.last_error()})", "error")
                 return False
             if res.retcode in (m.TRADE_RETCODE_DONE, m.TRADE_RETCODE_PLACED):
-                log.info("%s OK ticket=%s", label, res.order or res.deal)
+                extra = f" tras {attempt} reintento(s)" if attempt else ""
+                log.info("%s OK ticket=%s%s", label, res.order or res.deal, extra)
+                if attempt:
+                    self.notify(f"🔁 {label}: ejecutada{extra} (requote)", "info")
                 return True
             if res.retcode == m.TRADE_RETCODE_INVALID_FILL:
+                fi += 1
+                continue
+            if res.retcode in requote and attempt < retries:
+                attempt += 1
+                tick = m.symbol_info_tick(self.symbol)
+                if tick is None:
+                    break
+                buy = req["type"] == m.ORDER_TYPE_BUY
+                new = tick.ask if buy else tick.bid
+                worse = (new - orig_price) if buy else (orig_price - new)
+                if guard and worse > self.cfg["retry_max_slippage"]:
+                    log.error("%s: precio empeoró %.2f USD (máx %.2f): se aborta", label, worse,
+                              self.cfg["retry_max_slippage"])
+                    self.notify(f"❌ {label} NO ejecutada: el precio se movió {worse:.2f} USD en "
+                                f"contra (máx. permitido {self.cfg['retry_max_slippage']}). "
+                                "Se cancela para no entrar a mal precio.", "error")
+                    return False
+                log.warning("%s: requote (código %s), reintento %s/%s a %s", label, res.retcode,
+                            attempt, retries, new)
+                req = {**req, "price": new}
+                time.sleep(self.cfg["retry_delay_ms"] / 1000)
                 continue
             log.error("%s FALLÓ retcode=%s %s", label, res.retcode, res.comment)
             self.notify(f"❌ {label} FALLÓ: {res.comment} (código {res.retcode})", "error")
             return False
-        self.notify(f"❌ {label} FALLÓ: ningún modo de llenado aceptado", "error")
-        log.error("%s FALLÓ: ningún modo de llenado aceptado", label)
+        self.notify(f"❌ {label} FALLÓ: ningún modo de llenado aceptado o sin precio", "error")
+        log.error("%s FALLÓ: ningún modo de llenado aceptado o sin precio", label)
         return False
 
     # -------------------------------------------------------------- señales
@@ -193,6 +231,12 @@ class Trader:
                 max_pending_distance=c["max_pending_distance"],
                 max_tps=c["max_tps"], allow_no_tp=c["allow_no_tp"],
             )
+            plans, adjustments = apply_stops_level(
+                plans, tick.bid, tick.ask, self.min_stop_distance(),
+                c["stops_policy"], self.si.point)
+            if adjustments:
+                self.notify(f"⚠️ Señal {msg_id}: niveles ajustados a la distancia mínima del "
+                            f"broker: {'; '.join(sorted(set(adjustments)))}", "warn")
         except Skip as e:
             log.warning("Señal %s ignorada: %s", msg_id, e)
             self.notify(f"⚠️ Señal {msg_id} ignorada: {e}", "warn")
@@ -242,7 +286,7 @@ class Trader:
                     req.update(type_time=m.ORDER_TIME_SPECIFIED,
                                expiration=int(tick.time + c["pending_expiry_min"] * 60))
             label = f"{p.side} {p.kind} {vol} lotes TP={p.tp or '-'} (msg {msg_id})"
-            sent += self._send(req, label)
+            sent += self._send(req, label, guard=(p.kind == "market"))
         tps = ", ".join(str(p.tp) if p.tp else "-" for p in plans)
         self.notify(f"{'✅' if sent == len(plans) else '⚠️'} Señal {msg_id}: {plans[0].side} "
                     f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
@@ -308,6 +352,14 @@ class Trader:
                 new_sl = price
             new_sl = round(new_sl, digits)
             if abs(new_sl - p.sl) < 10 ** -digits:
+                continue
+            md = self.min_stop_distance()
+            gap = (tick.bid - new_sl) if buy else (new_sl - tick.ask)
+            if gap < md:
+                log.warning("Posición %s: SL %s demasiado cerca del precio (mín. %.2f): omitido",
+                            p.ticket, new_sl, md)
+                self.notify(f"⚠️ Posición {p.ticket}: no se movió el SL a {new_sl} (queda a "
+                            f"{gap:.2f} del precio; el broker exige {md:.2f})", "warn")
                 continue
             self._send({"action": m.TRADE_ACTION_SLTP, "symbol": self.symbol,
                         "position": p.ticket, "sl": new_sl, "tp": p.tp,

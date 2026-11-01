@@ -28,6 +28,8 @@ def load_config(path: str) -> dict:
     if not cp.read(path, encoding="utf-8"):
         raise SystemExit(f"No encuentro {path}. Copia config.example.ini a config.ini y edítalo.")
     t, m, r = cp["telegram"], cp["mt5"], cp["trading"]
+    if r.get("stops_policy", "skip").strip().lower() not in ("skip", "adjust"):
+        raise SystemExit("[trading] stops_policy debe ser 'skip' o 'adjust'")
     f = cp["filters"] if cp.has_section("filters") else {}
     try:
         schedule = TradingSchedule.from_text(
@@ -63,6 +65,10 @@ def load_config(path: str) -> dict:
         "allow_no_tp": r.getboolean("allow_no_tp", False),
         "enable_commands": r.getboolean("enable_commands", True),
         "be_offset": r.getfloat("be_offset", 0.0),
+        "requote_retries": r.getint("requote_retries", 3),
+        "retry_delay_ms": r.getint("retry_delay_ms", 200),
+        "retry_max_slippage": r.getfloat("retry_max_slippage", 1.0),
+        "stops_policy": r.get("stops_policy", "skip").strip().lower(),
     }
 
 

@@ -8,6 +8,7 @@ C = dict(
     ORDER_FILLING_FOK=0, ORDER_FILLING_IOC=1, ORDER_FILLING_RETURN=2,
     ORDER_TIME_GTC=0, ORDER_TIME_SPECIFIED=2,
     TRADE_RETCODE_DONE=10009, TRADE_RETCODE_PLACED=10008, TRADE_RETCODE_INVALID_FILL=10030,
+    TRADE_RETCODE_REQUOTE=10004, TRADE_RETCODE_PRICE_CHANGED=10020, TRADE_RETCODE_PRICE_OFF=10021,
     POSITION_TYPE_BUY=0, POSITION_TYPE_SELL=1, ACCOUNT_TRADE_MODE_DEMO=0,
 )
 
@@ -33,12 +34,15 @@ class FakeMT5(NS):
 
     def order_send(self, req):
         self.sent.append(req)
+        if getattr(self, "tick_after", None):
+            bid, ask = self.tick_after.pop(0)
+            self.tick = NS(bid=bid, ask=ask, time=self.tick.time)
         code = self.retcodes.pop(0) if self.retcodes else self.TRADE_RETCODE_DONE
         return NS(retcode=code, comment="fake comment", order=len(self.sent), deal=len(self.sent))
 
 
-def symbol_info(filling_mode=3):
-    return NS(digits=2, volume_step=0.01, volume_min=0.01, volume_max=100.0,
+def symbol_info(filling_mode=3, stops_level=0):
+    return NS(digits=2, point=0.01, trade_stops_level=stops_level, volume_step=0.01, volume_min=0.01, volume_max=100.0,
               filling_mode=filling_mode, trade_tick_size=0.01, trade_tick_value=1.0,
               visible=True)
 

@@ -85,3 +85,51 @@ def plan_orders(
         tps = [0.0]
 
     return [OrderPlan(sig.side, kind, ref, sig.sl, tp) for tp in tps]
+
+
+def apply_stops_level(
+    plans: List[OrderPlan],
+    bid: float,
+    ask: float,
+    min_dist: float,
+    policy: str = "skip",
+    point: float = 0.01,
+) -> "tuple[List[OrderPlan], List[str]]":
+    """Revisa la distancia mínima (stops level) que exige el broker.
+
+    Se mide como lo hace MT5: en mercado, SL y TP contra el precio de CIERRE
+    (BUY: bid, SELL: ask); en pendientes, contra el precio de la orden, y la
+    orden misma debe quedar a >= min_dist del precio actual.
+    policy="skip": lanza Skip si algo no cumple. policy="adjust": aleja SL/TP
+    hasta el mínimo (las pendientes demasiado cerca siempre se omiten).
+    Devuelve (planes, avisos).
+    """
+    if min_dist <= 0:
+        return plans, []
+    out, notes = [], []
+    margin = min_dist + point
+    for p in plans:
+        buy = p.side == "BUY"
+        if p.kind == "market":
+            ref = bid if buy else ask
+        else:
+            cur = ask if buy else bid
+            if abs(p.price - cur) < min_dist:
+                raise Skip(f"orden pendiente en {p.price} demasiado cerca del precio {cur} "
+                           f"(distancia mínima del broker: {min_dist:.2f})")
+            ref = p.price
+        sl_d = (ref - p.sl) if buy else (p.sl - ref)
+        tp_d = ((p.tp - ref) if buy else (ref - p.tp)) if p.tp else None
+        sl, tp = p.sl, p.tp
+        if sl_d < min_dist:
+            if policy != "adjust":
+                raise Skip(f"SL {p.sl} demasiado cerca ({sl_d:.2f} < mínimo del broker {min_dist:.2f})")
+            sl = ref - margin if buy else ref + margin
+            notes.append(f"SL {p.sl} -> {sl:.2f} (mínimo del broker {min_dist:.2f})")
+        if tp_d is not None and tp_d < min_dist:
+            if policy != "adjust":
+                raise Skip(f"TP {p.tp} demasiado cerca ({tp_d:.2f} < mínimo del broker {min_dist:.2f})")
+            tp = ref + margin if buy else ref - margin
+            notes.append(f"TP {p.tp} -> {tp:.2f} (mínimo del broker {min_dist:.2f})")
+        out.append(OrderPlan(p.side, p.kind, p.price, sl, tp))
+    return out, notes
