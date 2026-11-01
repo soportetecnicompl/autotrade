@@ -6,3 +6,4 @@ __pycache__/
 .venv/
 history.json
 backtest_trades.csv
+report.html

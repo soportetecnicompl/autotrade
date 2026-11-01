@@ -17,9 +17,9 @@ import argparse
 import asyncio
 import json
 import time
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 
+from autotrade.analysis import analyze, render_html, render_text
 from autotrade.schedule import TradingSchedule
 from autotrade.backtest import (Msg, Prices, SimConfig, is_us_dst, load_csv, make_offset_fn,
                                 report, simulate, write_trades_csv)
@@ -95,15 +95,16 @@ def run(a) -> None:
                     schedule=TradingSchedule.from_text(a.trading_days, a.trading_hours, a.report_tz))
     if cfg.schedule and not cfg.schedule.always:
         print("Filtro de horario:", cfg.schedule.describe())
-    results, skipped = {}, Counter()
-    for follow in (False, True):
-        sk = Counter()
-        results["follow" if follow else "static"] = simulate(msgs, P, cfg, follow, sk)
-        skipped = sk  # igual en ambos modos
+    A = analyze(msgs, P, cfg, balance=a.balance, tz=a.report_tz, min_n=a.min_hour_signals,
+                sweep=not a.no_sweep)
     print()
-    print(report(results, skipped, cfg, a.report_tz))
-    write_trades_csv(a.out, [t for ts in results.values() for t in ts])
-    print(f"\nDetalle por orden: {a.out}")
+    print(report({"static": A["static_trades"], "follow": A["follow_trades"]}, A["skipped"], cfg, a.report_tz))
+    print(render_text(A))
+    write_trades_csv(a.out, A["static_trades"] + A["follow_trades"])
+    with open(a.report, "w", encoding="utf-8") as f:
+        f.write(render_html(A))
+    print(f"\nInforme HTML (ábrelo en el navegador): {a.report}")
+    print(f"Detalle por orden (CSV): {a.out}")
     print("static = solo SL/TP originales | follow = además obedece los mensajes del canal (BE, close all...)")
 
 
@@ -137,6 +138,10 @@ def main() -> None:
     r.add_argument("--trading-hours", default="", help='ej. "08:00-12:00,14:00-18:00" (en --report-tz)')
     r.add_argument("--trading-days", default="", help='ej. "Mon-Fri"')
     r.add_argument("--out", default="backtest_trades.csv")
+    r.add_argument("--report", default="report.html", help="informe HTML de salida")
+    r.add_argument("--balance", type=float, default=1000.0, help="saldo de referencia para calcular % de retorno y drawdown")
+    r.add_argument("--min-hour-signals", type=int, default=3, help="mín. señales por hora/día para proponerlo en el filtro")
+    r.add_argument("--no-sweep", action="store_true", help="omite la comparación de variantes y de retraso (más rápido)")
 
     a = ap.parse_args()
     if a.cmd == "fetch":
