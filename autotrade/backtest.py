@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .parser import Command, ParseResult, parse
-from .planner import OrderPlan, Skip, plan_orders
+from .planner import OrderPlan, Skip, fill_defaults, plan_orders
 from .schedule import TradingSchedule
 
 Bar = Tuple[int, float, float, float, float]  # ts_servidor, o, h, l, c
@@ -111,6 +111,12 @@ class SimConfig:
     volume_min: float = 0.01
     volume_step: float = 0.01
     schedule: Optional[TradingSchedule] = None   # filtro de horario (None = sin filtro)
+    # Canales que mandan la dirección primero y el SL después (misma lógica que el bot en vivo)
+    entry_then_sl: bool = False
+    emergency_sl_pips: float = 100.0
+    tp_pips: tuple = ()                          # TP por defecto en pips cuando la señal no trae
+    pip: float = 0.10                            # USD por pip
+    late_sl_min: int = 30
 
 
 @dataclass
@@ -187,6 +193,13 @@ def _sim_order(plan: OrderPlan, lot: float, i0: int, i_end: int, P: Prices,
                 realize(px_close, remaining * cmd.value)
             elif cmd.kind == "move_sl" and cmd.value:
                 sl = cmd.value
+            elif cmd.kind == "set_sl" and cmd.value:              # SL que manda el canal después de la entrada
+                new = (entry - sgn * cmd.value * cfg.pip) if cmd.pips else cmd.value
+                if (buy and px_close <= new) or (not buy and px_close >= new):
+                    realize(px_close, remaining)                  # el precio ya superó ese SL: se cierra al instante
+                    finish(i, px_close, "SL")
+                    return
+                sl = new
             elif cmd.kind == "breakeven":
                 new_sl = entry + sgn * cfg.be_offset
                 if (buy and o > new_sl) or (not buy and o + sp < new_sl):
@@ -244,8 +257,22 @@ def _sim_order(plan: OrderPlan, lot: float, i0: int, i_end: int, P: Prices,
 def simulate(msgs: List[Msg], P: Prices, cfg: SimConfig, follow_updates: bool,
              skipped: Optional[Counter] = None) -> List[Trade]:
     mode = "follow" if follow_updates else "static"
-    parsed = [(m, parse(m.text)) for m in sorted(msgs, key=lambda m: m.ts)]
+    parsed = [(m, parse(m.text, entry_then_sl=cfg.entry_then_sl)) for m in sorted(msgs, key=lambda m: m.ts)]
     all_cmds = [(m, c) for m, r in parsed for c in r.commands]
+    # SL tardío de cada señal: el mensaje que responde a la entrada o, si no, la entrada más reciente
+    # del canal dentro de la ventana. Forma parte de la señal, así que se aplica también en modo «static».
+    late: Dict[int, List[Tuple[Msg, Command]]] = {}
+    if cfg.entry_then_sl:
+        entries = [m for m, r in parsed if r.signal]
+        by_id = {m.id: m for m in entries}
+        for cm, c in all_cmds:
+            if c.kind != "set_sl":
+                continue
+            target = by_id.get(cm.reply_to) if cm.reply_to is not None else None
+            if target is None:
+                target = next((e for e in reversed(entries) if e.ts < cm.ts), None)
+            if target is not None and 0 < cm.ts - target.ts <= cfg.late_sl_min * 60:
+                late.setdefault(target.id, []).append((cm, c))
     trades: List[Trade] = []
 
     for m, r in parsed:
@@ -262,6 +289,8 @@ def simulate(msgs: List[Msg], P: Prices, cfg: SimConfig, follow_updates: bool,
             continue
         i0 = P.idx(m.ts + cfg.delay)
         o = P.bars[i0][1]
+        sig = fill_defaults(sig, o, o + cfg.spread, cfg.emergency_sl_pips if cfg.entry_then_sl else 0.0,
+                            cfg.tp_pips, cfg.pip)
         try:
             plans = plan_orders(sig, o, o + cfg.spread, market_tolerance=cfg.market_tolerance,
                                 max_pending_distance=cfg.max_pending_distance,
@@ -273,15 +302,15 @@ def simulate(msgs: List[Msg], P: Prices, cfg: SimConfig, follow_updates: bool,
         lots = split_lots(cfg.lot, len(plans), cfg)
         plans = plans[:len(lots)]
         i_end = P.idx(m.ts + cfg.max_hold_hours * 3600)
-        cmds = []
+        cmds = [(P.idx(cm.ts + cfg.delay), c) for cm, c in late.get(m.id, [])]
         if follow_updates:
             for cm, c in all_cmds:
-                if cm.ts <= m.ts or cm.ts > m.ts + cfg.max_hold_hours * 3600:
+                if c.kind == "set_sl" or cm.ts <= m.ts or cm.ts > m.ts + cfg.max_hold_hours * 3600:
                     continue
                 if cm.reply_to is not None and cm.reply_to != m.id:
                     continue  # respuesta a OTRA señal
                 cmds.append((P.idx(cm.ts + cfg.delay), c))
-            cmds.sort(key=lambda x: x[0])
+        cmds.sort(key=lambda x: x[0])
         for n, (p, lot) in enumerate(zip(plans, lots), 1):
             tr = Trade(mode, m.id, m.ts, p.side, p.kind, n, lot, entry=p.price, sl=p.sl, tp=p.tp)
             _sim_order(p, lot, i0, min(i_end, len(P.bars)), P, cmds, cfg, tr)

@@ -57,8 +57,9 @@ class Signal:
 
 @dataclass
 class Command:
-    kind: str                      # breakeven | close | partial | move_sl | cancel
-    value: Optional[float] = None  # precio (move_sl) o fracción (partial)
+    kind: str                      # breakeven | close | partial | move_sl | set_sl | cancel
+    value: Optional[float] = None  # precio (move_sl/set_sl) o fracción (partial)
+    pips: bool = False             # set_sl: el valor son PIPS de distancia a la entrada, no un precio
 
 
 @dataclass
@@ -147,8 +148,54 @@ def looks_like_signal(text: str) -> bool:
     return bool(LOOKS_RE.search(t)) and len(re.findall(r"\d{3,5}", t)) >= 1
 
 
-def parse(text: str) -> ParseResult:
+# --- canales que mandan la señal en DOS mensajes: primero «compra/venta» y luego el SL -----------------
+BARE_RE = re.compile(
+    r"^\W*(?:(?:XAUUSD|XAU|GOLD|ORO)\W+)*"
+    r"(BUY|SELL|LONG|SHORT|COMPRAR?|COMPRA|VENDER?|VENDE|VENTA)"
+    r"(?:\W+(?:NOW|AHORA|YA|MARKET|MERCADO|XAUUSD|XAU|GOLD|ORO))*"
+    r"(?:\W*@?\s*(\d{3,5}(?:\.\d+)?))?\W*$")
+LATE_SL_RE = re.compile(
+    r"(?:\bSL|\bSTOP(?:\s*LOSS)?)\s*(?:[:=@\-]|ES|EN|A|TO|AT)?\s*(\d+(?:\.\d+)?)\s*(PIPS?|PTS|PUNTOS|POINTS)?\b")
+
+
+def parse_bare_entry(text: str) -> Optional[Signal]:
+    """Mensaje que es SOLO «compra/venta» (con símbolo, «ahora» o un precio opcionales), sin SL ni TP.
+    Solo se usa en canales marcados como «señal en dos mensajes»."""
+    m = BARE_RE.match(_normalize(text).strip())
+    if not m:
+        return None
+    price = float(m.group(2)) if m.group(2) else None
+    return Signal(side=_side(m.group(1)), entry_low=price, entry_high=price)
+
+
+def parse_late_sl(text: str) -> Optional[Command]:
+    """SL que llega en un mensaje aparte: «SL 3935», «Stop loss: 3935» o «SL 20 pips».
+    Un número sin unidad menor de 1000 no puede ser un precio del oro: se toma como pips."""
+    m = LATE_SL_RE.search(_normalize(text))
+    if not m:
+        return None
+    value = float(m.group(1))
+    if value <= 0:
+        return None
+    pips = bool(m.group(2)) or value < 1000
+    return Command("set_sl", value, pips=pips)
+
+
+def parse(text: str, entry_then_sl: bool = False) -> ParseResult:
+    """entry_then_sl=True activa el modo de canales que mandan primero la dirección y luego el SL."""
     sig = parse_signal(text)
     if sig:
         return ParseResult(signal=sig)
-    return ParseResult(commands=parse_commands(text))
+    if entry_then_sl:
+        bare = parse_bare_entry(text)
+        if bare:
+            return ParseResult(signal=bare)
+    cmds = parse_commands(text)
+    if entry_then_sl:
+        # en estos canales un «SL …» sin más es el SL de la última entrada, no «mover el SL de todo»
+        cmds = [Command("set_sl", c.value) if c.kind == "move_sl" else c for c in cmds]
+        if not any(c.kind == "set_sl" for c in cmds):
+            late = parse_late_sl(text)
+            if late:
+                cmds.append(late)
+    return ParseResult(commands=cmds)

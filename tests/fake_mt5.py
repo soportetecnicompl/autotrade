@@ -50,9 +50,9 @@ def symbol_info(filling_mode=3, stops_level=0):
 
 
 def position(ticket, side, price_open, sl=0.0, tp=0.0, volume=0.02, comment="tg1.1:1", magic=777,
-             profit=0.0, swap=0.0):
+             profit=0.0, swap=0.0, time=1_700_000_000 - 60):
     return NS(ticket=ticket, type=0 if side == "BUY" else 1, price_open=price_open, sl=sl,
-              tp=tp, volume=volume, comment=comment, magic=magic, profit=profit, swap=swap)
+              tp=tp, volume=volume, comment=comment, magic=magic, profit=profit, swap=swap, time=time)
 
 
 def deal(entry, time, profit, magic=777, swap=0.0, commission=0.0):

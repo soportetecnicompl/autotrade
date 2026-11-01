@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .backtest import is_us_dst
-from .channels import ChannelCfg, parse_channels, render_channels
+from .channels import ChannelCfg, parse_channels, parse_pip_list, render_channels
 from .schedule import TradingSchedule
 
 
@@ -223,6 +223,16 @@ def validate_channel(s: Settings) -> List[str]:
             errs.append(f"Canal «{name}»: el lote debe estar entre 0.01 y 100 (o vacío para usar el general).")
         if c.max_tps not in (0, 1, 2, 3):
             errs.append(f"Canal «{name}»: los TPs deben ser 1, 2 o 3 (o el general).")
+        try:
+            parse_pip_list(c.tp_pips)
+        except ValueError as e:
+            errs.append(f"Canal «{name}»: TP por defecto en pips: {e} (ej. 30 o 30, 60).")
+        if not 0.001 <= c.pip_size <= 10:
+            errs.append(f"Canal «{name}»: el tamaño del pip debe estar entre 0.001 y 10 USD (oro: 0.10).")
+        if c.entry_then_sl and not 0 <= c.emergency_sl_pips <= 5000:
+            errs.append(f"Canal «{name}»: el SL de emergencia debe estar entre 0 y 5000 pips.")
+        if not 1 <= c.late_sl_min <= 240:
+            errs.append(f"Canal «{name}»: los minutos para aceptar el SL deben estar entre 1 y 240.")
     return errs
 
 

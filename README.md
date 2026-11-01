@@ -46,6 +46,17 @@ Todo es opcional y se configura en el paso **«Protecciones»** del asistente (0
 
 Notas honestas: el límite diario se evalúa cada vez que llega una señal y cada 30 s; el rendimiento en simulación aparece vacío (no hay operaciones); el calendario automático usa una fuente pública de terceros cuyo formato no se pudo comprobar desde el entorno de desarrollo (por eso el modo manual es el garantizado); y el break-even automático olvida el seguimiento si se reinicia el programa a mitad de una señal (el BE por mensaje del canal sigue funcionando).
 
+## Canales que mandan la señal en dos mensajes
+
+Algunos canales escriben primero solo **«compra» o «venta»** (y ahí se abre la operación), después mandan el **SL** en otro mensaje y casi nunca ponen TP. Se activa por canal: paso «Canales» → marca el canal → **«Ajustes avanzados…»** → «Las manda en DOS mensajes».
+
+- **Al llegar «SELL» / «BUY»** (también «venta», «compra», «sell now», «XAUUSD BUY», o con un precio: «SELL GOLD @3896») se abre la operación **al instante, a mercado**. Solo ese canal reconoce un «SELL» suelto: en los demás se ignora como antes.
+- **SL de emergencia.** Entre el primer mensaje y el SL del canal la operación no tendría ninguna protección, así que se pone un SL provisional a X pips (por defecto 100 pips = 10 USD). Se reemplaza cuando llega el SL real. Con 0 el programa te pide confirmar, porque la operación quedaría sin SL.
+- **SL del canal.** Se acepta como «SL 3935», «Stop loss: 3935», «SL 20 pips» (un número menor de 1000 sin unidad se toma como pips). Se aplica a la señal a la que responde el mensaje o, si no responde a ninguna, a la **entrada más reciente de ese canal** dentro de los minutos configurados (30 por defecto). Si el precio ya superó ese SL, la operación se cierra (es lo que habría pasado). Si queda más cerca del precio de lo que permite el broker, se avisa y se deja el SL anterior.
+- **TP por defecto en pips** (ej. 30; con «30, 60» se abre una orden por cada uno y se reparte el lote). Se usa cuando el mensaje no trae TP, en este modo y también en canales normales si lo configuras.
+- **Tamaño del pip.** En el oro 1 pip = 0.10 USD (30 pips = 3 USD), así que 30 pips = 3 USD de recorrido. Es ajustable por canal: **confirma con tu canal qué entiende por «pip»**, porque de eso depende cuánto es 30 pips.
+- El análisis del canal (backtest) usa las mismas reglas: SL de emergencia hasta que llega el SL del canal, TP por defecto y cierre inmediato si el precio ya superó el SL.
+
 ## Qué hace
 
 | Mensaje del canal | Acción |

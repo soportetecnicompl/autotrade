@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
+import dataclasses
+
 from .parser import Signal
 
 
@@ -85,6 +87,26 @@ def plan_orders(
         tps = [0.0]
 
     return [OrderPlan(sig.side, kind, ref, sig.sl, tp) for tp in tps]
+
+
+def fill_defaults(sig: Signal, bid: float, ask: float, emergency_sl_pips: float = 0.0,
+                  tp_pips=(), pip: float = 0.10) -> Signal:
+    """Completa lo que la señal no trae, midiendo en pips desde la entrada:
+    - SL de emergencia (solo si la señal no trae SL y se pidió uno): protege hasta que llegue el SL real.
+    - TP por defecto (solo si la señal no trae ningún TP): uno por cada valor de `tp_pips`.
+    La entrada de referencia es el precio actual (a mercado) o el precio que indique la señal."""
+    buy = sig.side == "BUY"
+    if sig.entry_low is None:
+        ref = ask if buy else bid
+    else:
+        ref = (sig.entry_low + (sig.entry_high if sig.entry_high is not None else sig.entry_low)) / 2
+    sign = 1 if buy else -1
+    sl, tps = sig.sl, list(sig.tps)
+    if sl is None and emergency_sl_pips > 0:
+        sl = round(ref - sign * emergency_sl_pips * pip, 5)
+    if not tps and tp_pips:
+        tps = [round(ref + sign * p * pip, 5) for p in tp_pips]
+    return dataclasses.replace(sig, sl=sl, tps=tps)
 
 
 def apply_stops_level(

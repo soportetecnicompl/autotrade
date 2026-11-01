@@ -268,13 +268,60 @@ class GuiTests(unittest.TestCase):
         c.ed_lot.set("0.05"); c.ed_tps.set("3"); c.apply_edit()
         ch = a.settings.channels[1]
         self.assertEqual((ch.lot_size, ch.max_tps), (0.05, 3))
-        self.assertEqual(c.chosen.item("2", "values")[2:], ("0.05", "3"))
+        self.assertEqual(c.chosen.item("2", "values")[2:], ("0.05", "3", "Normal"))
         c.ed_lot.set(""); c.ed_tps.set("General"); c.apply_edit()
         self.assertEqual((ch.lot_size, ch.max_tps), (0.0, 0))            # vacío/General = usar los generales
         c.toggle_enabled("2")
         self.assertFalse(ch.enabled)
         c.remove_selected()
         self.assertEqual([x.num for x in a.settings.channels], [1])
+
+    def test_advanced_dialog_configures_a_two_message_channel(self):
+        a, c = self.app, self.load_channels()
+        c.toggle_iid("0")
+        c.chosen.selection_set("1"); c.on_pick()
+        dlg = c.open_advanced(modal=False)
+        self.assertFalse(a.settings.channels[0].entry_then_sl)
+        self.assertEqual(str(dlg.rows[0].cget("state")), "disabled")                  # sin marcar: campos de emergencia apagados
+        dlg.two.set(True); dlg.toggle()
+        self.assertEqual(str(dlg.rows[0].cget("state")), "normal")
+        dlg.emerg.set("80"); dlg.tp.set("30, 60"); dlg.pip.set("0.1"); dlg.late.set("45")
+        dlg.update_preview()
+        self.assertIn("SL de emergencia: 8 USD", dlg.preview.cget("text"))
+        self.assertIn("TP: 3 USD", dlg.preview.cget("text"))
+        self.assertIn("TP: 6 USD", dlg.preview.cget("text"))
+        dlg.save()
+        ch = a.settings.channels[0]
+        self.assertEqual((ch.entry_then_sl, ch.emergency_sl_pips, ch.tp_pips, ch.pip_size, ch.late_sl_min),
+                         (True, 80.0, "30, 60", 0.1, 45))
+        self.assertEqual(c.chosen.item("1", "values")[4], "2 mensajes")               # la tabla lo refleja
+        a.show(self.PANEL)
+        self.assertIn("2 mensajes", a.steps[self.PANEL].summary.cget("text"))
+
+    def test_advanced_dialog_rejects_bad_numbers_and_confirms_no_protection(self):
+        a, c = self.app, self.load_channels()
+        c.toggle_iid("0")
+        c.chosen.selection_set("1"); c.on_pick()
+        dlg = c.open_advanced(modal=False)
+        dlg.two.set(True)
+        dlg.tp.set("treinta"); dlg.save()
+        self.assertTrue(any("no se entiende" in m for _, _, m in self.dialogs))
+        self.assertFalse(a.settings.channels[0].entry_then_sl)                          # nada se guardó
+        dlg.tp.set("30"); dlg.pip.set("0"); dlg.save()
+        self.assertTrue(any("tamaño del pip" in m for _, _, m in self.dialogs))
+        dlg.pip.set("0.1"); dlg.emerg.set("0")
+        self.answer = False                                                              # «no estoy seguro»: no se guarda
+        dlg.save()
+        self.assertTrue(any(t == "Sin SL de emergencia" for _, t, _ in self.dialogs))
+        self.assertFalse(a.settings.channels[0].entry_then_sl)
+        self.answer = True
+        dlg.save()
+        self.assertEqual((a.settings.channels[0].entry_then_sl, a.settings.channels[0].emergency_sl_pips), (True, 0.0))
+
+    def test_advanced_button_needs_a_selected_channel(self):
+        c = self.load_channels()
+        self.assertIsNone(c.open_advanced(modal=False))
+        self.assertIn("Marca primero un canal", c.st.cget("text"))
 
     def test_toggle_in_list_adds_and_removes_and_numbers_stay_stable(self):
         a, c = self.app, self.load_channels()

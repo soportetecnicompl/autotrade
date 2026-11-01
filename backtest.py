@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from autotrade.analysis import analyze, render_html, render_text
+from autotrade.channels import parse_pip_list
 from autotrade.schedule import TradingSchedule
 from autotrade.backtest import (Msg, Prices, SimConfig, is_us_dst, load_csv, make_offset_fn,
                                 report, simulate, write_trades_csv)
@@ -108,7 +109,9 @@ def run(a) -> None:
                     pending_expiry_min=a.pending_expiry_min, max_tps=a.max_tps,
                     market_tolerance=a.market_tolerance, volume_min=a.volume_min,
                     volume_step=a.volume_step,
-                    schedule=TradingSchedule.from_text(a.trading_days, a.trading_hours, a.report_tz))
+                    schedule=TradingSchedule.from_text(a.trading_days, a.trading_hours, a.report_tz),
+                    entry_then_sl=a.entry_then_sl, emergency_sl_pips=a.emergency_sl_pips,
+                    tp_pips=tuple(parse_pip_list(a.tp_pips)), pip=a.pip_size, late_sl_min=a.late_sl_min)
     if cfg.schedule and not cfg.schedule.always:
         print("Filtro de horario:", cfg.schedule.describe())
     A = analyze(msgs, P, cfg, balance=a.balance, tz=a.report_tz, min_n=a.min_hour_signals,
@@ -155,6 +158,12 @@ def main() -> None:
     r.add_argument("--trading-hours", default="", help='ej. "08:00-12:00,14:00-18:00" (en --report-tz)')
     r.add_argument("--trading-days", default="", help='ej. "Mon-Fri"')
     r.add_argument("--out", default="backtest_trades.csv")
+    r.add_argument("--entry-then-sl", action="store_true",
+                   help="el canal manda primero compra/venta (se abre al instante) y luego el SL")
+    r.add_argument("--emergency-sl-pips", type=float, default=100.0, help="SL provisional hasta que llegue el del canal")
+    r.add_argument("--tp-pips", default="", help='TP por defecto en pips si la señal no trae, ej. "30" o "30,60"')
+    r.add_argument("--pip-size", type=float, default=0.10, help="USD por pip (oro: 0.10)")
+    r.add_argument("--late-sl-min", type=int, default=30, help="minutos tras la entrada en que se acepta el SL")
     r.add_argument("--report", default="report.html", help="informe HTML de salida")
     r.add_argument("--balance", type=float, default=1000.0, help="saldo de referencia para calcular %% de retorno y drawdown")
     r.add_argument("--min-hour-signals", type=int, default=3, help="mín. señales por hora/día para proponerlo en el filtro")

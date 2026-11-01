@@ -24,10 +24,31 @@ class ChannelCfg:
     enabled: bool = True
     lot_size: float = 0.0        # 0 = usar el lote general
     max_tps: int = 0             # 0 = usar el máximo general
+    # Canales que mandan la señal en DOS mensajes (primero compra/venta, luego el SL):
+    entry_then_sl: bool = False
+    emergency_sl_pips: float = 100.0   # SL provisional al abrir, hasta que llegue el SL del canal
+    tp_pips: str = ""                  # TP por defecto en pips si la señal no trae ("30" o "30, 60")
+    pip_size: float = 0.10             # USD por pip (oro: 1 pip = 0.10 USD, o sea 30 pips = 3.00 USD)
+    late_sl_min: int = 30              # minutos tras la entrada en que se acepta el SL del canal
 
     def to_dict(self) -> dict:
         return {"num": self.num, "ref": self.ref, "title": self.title, "enabled": self.enabled,
-                "lot_size": self.lot_size, "max_tps": self.max_tps}
+                "lot_size": self.lot_size, "max_tps": self.max_tps, "entry_then_sl": self.entry_then_sl,
+                "emergency_sl_pips": self.emergency_sl_pips, "tp_pips": self.tp_pips, "pip_size": self.pip_size,
+                "late_sl_min": self.late_sl_min}
+
+
+def parse_pip_list(text: str) -> List[float]:
+    """«30» -> [30.0]; «30, 60» -> [30.0, 60.0]; vacío -> []. ValueError si algo no es un número positivo."""
+    out = []
+    for part in re.split(r"[;,\s]+", (text or "").strip()):
+        if not part:
+            continue
+        v = float(part.replace(",", "."))
+        if v <= 0:
+            raise ValueError(f"«{part}» no es una cantidad de pips válida")
+        out.append(v)
+    return out
 
 
 def next_num(channels: List[ChannelCfg]) -> int:
@@ -53,7 +74,10 @@ def parse_channels(cp: configparser.ConfigParser) -> List[ChannelCfg]:
         out.append(ChannelCfg(
             num=int(m.group(1)), ref=ref, title=s.get("title", "").strip(),
             enabled=s.get("enabled", "true").strip().lower() in ("1", "true", "yes", "si", "sí", "on"),
-            lot_size=num("lot_size", float, 0.0), max_tps=num("max_tps", int, 0)))
+            lot_size=num("lot_size", float, 0.0), max_tps=num("max_tps", int, 0),
+            entry_then_sl=s.get("entry_then_sl", "false").strip().lower() in ("1", "true", "yes", "si", "sí", "on"),
+            emergency_sl_pips=num("emergency_sl_pips", float, 100.0), tp_pips=s.get("tp_pips", "").strip(),
+            pip_size=num("pip_size", float, 0.10) or 0.10, late_sl_min=num("late_sl_min", int, 30) or 30))
     out.sort(key=lambda c: c.num)
     if not out and cp.has_section("telegram"):      # formato antiguo: un solo canal
         ref = cp["telegram"].get("channel", "").strip()
@@ -75,7 +99,13 @@ def render_channels(channels: List[ChannelCfg]) -> str:
             f"enabled = {'true' if c.enabled else 'false'}\n"
             f"; 0 = usar el lote / máximo de TPs generales\n"
             f"lot_size = {c.lot_size:g}\n"
-            f"max_tps = {c.max_tps}\n")
+            f"max_tps = {c.max_tps}\n"
+            f"; señales en dos mensajes (primero compra/venta, luego el SL):\n"
+            f"entry_then_sl = {'true' if c.entry_then_sl else 'false'}\n"
+            f"emergency_sl_pips = {c.emergency_sl_pips:g}\n"
+            f"tp_pips = {c.tp_pips}\n"
+            f"pip_size = {c.pip_size:g}\n"
+            f"late_sl_min = {c.late_sl_min}\n")
     return "\n".join(blocks)
 
 

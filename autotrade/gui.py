@@ -29,7 +29,7 @@ from .version import __version__
 from .paths import (IS_WINDOWS, data_dir, launcher_cmd, pid_alive, popen_kwargs, stop_tree)
 from .schedule import parse_days
 from .setup_logic import Settings
-from .channels import ChannelCfg, channel_ref, next_num
+from .channels import ChannelCfg, channel_ref, next_num, parse_pip_list
 from .supervisor import PID_FILE, read_pid
 
 WRAP = 640
@@ -411,6 +411,113 @@ class TelegramStep(Step):
         return bool(self.app.tg_user)
 
 
+class ChannelDialog(tk.Toplevel):
+    """Ajustes avanzados de un canal: señales en dos mensajes, SL de emergencia, TP en pips."""
+
+    def __init__(self, app: "App", ch: ChannelCfg, on_save, modal: bool = True):
+        super().__init__(app)
+        self.ch, self.on_save = ch, on_save
+        self.title(f"Ajustes avanzados — {ch.title or ch.ref}")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(app)
+        self.two = tk.BooleanVar(value=ch.entry_then_sl)
+        self.emerg = tk.StringVar(value=f"{ch.emergency_sl_pips:g}")
+        self.tp = tk.StringVar(value=ch.tp_pips)
+        self.pip = tk.StringVar(value=f"{ch.pip_size:g}")
+        self.late = tk.StringVar(value=str(ch.late_sl_min))
+        body = ttk.Frame(self, padding=(22, 18))
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"Canal: {ch.title or ch.ref}", style="H2.TLabel").pack(anchor="w", pady=(0, 10))
+
+        box = ttk.LabelFrame(body, text=" Cómo manda las señales este canal ", padding=(12, 8))
+        box.pack(fill="x")
+        ttk.Checkbutton(box, text="Las manda en DOS mensajes: primero «compra» o «venta» y después el SL",
+                        variable=self.two, command=self.toggle).pack(anchor="w")
+        ttk.Label(box, text="La operación se abre al instante con el primer mensaje, protegida por un SL de emergencia "
+                            "hasta que llegue el SL del canal.", style="Muted.TLabel", wraplength=480).pack(anchor="w", pady=(2, 6))
+        self.rows = []
+        self.row(box, "SL de emergencia", self.emerg, "pips", "Protege la operación hasta que llegue el SL del canal. "
+                 "0 = sin protección (no recomendado).")
+        self.row(box, "Aceptar el SL hasta", self.late, "min", "después de la entrada; pasado ese tiempo se ignora.")
+
+        box2 = ttk.LabelFrame(body, text=" Niveles por defecto (si el mensaje no los trae) ", padding=(12, 8))
+        box2.pack(fill="x", pady=(10, 0))
+        self.row(box2, "TP por defecto", self.tp, "pips", "Vacío = sin TP. Con varios valores (30, 60) se abre una orden por cada TP.",
+                 always=True)
+        self.row(box2, "Tamaño del pip", self.pip, "USD", "Oro: normalmente 0.10 (30 pips = 3 USD). Confírmalo con tu canal.",
+                 always=True)
+        self.preview = ttk.Label(body, text="", style="Muted.TLabel", wraplength=480)
+        self.preview.pack(anchor="w", pady=(8, 0))
+        for v in (self.emerg, self.tp, self.pip):
+            v.trace_add("write", lambda *_: self.update_preview())
+        bar = ttk.Frame(body)
+        bar.pack(fill="x", pady=(14, 0))
+        ttk.Button(bar, text="Guardar", style="Accent.TButton", command=self.save).pack(side="right")
+        ttk.Button(bar, text="Cancelar", command=self.destroy).pack(side="right", padx=8)
+        self.toggle()
+        self.update_preview()
+        if modal:
+            try:
+                self.update_idletasks()
+                self.grab_set()
+            except tk.TclError:
+                pass
+
+    def row(self, parent, label, var, unit, hint, always=False):
+        r = ttk.Frame(parent)
+        r.pack(anchor="w", fill="x", pady=2)
+        ttk.Label(r, text=label, width=20).pack(side="left")
+        e = ttk.Entry(r, textvariable=var, width=8)
+        e.pack(side="left")
+        ttk.Label(r, text=unit, width=5).pack(side="left", padx=(6, 0))
+        ttk.Label(parent, text=hint, style="Muted.TLabel", wraplength=480).pack(anchor="w", padx=(20, 0), pady=(0, 4))
+        if not always:
+            self.rows.append(e)
+
+    def toggle(self):
+        state = "normal" if self.two.get() else "disabled"
+        for e in self.rows:
+            e.configure(state=state)
+
+    def update_preview(self):
+        try:
+            pip = float(self.pip.get().replace(",", "."))
+        except ValueError:
+            return self.preview.config(text="")
+        parts = []
+        try:
+            if self.two.get():
+                parts.append(f"SL de emergencia: {float(self.emerg.get().replace(',', '.')) * pip:g} USD")
+            parts += [f"TP: {p * pip:g} USD" for p in parse_pip_list(self.tp.get())]
+        except ValueError:
+            return self.preview.config(text="")
+        self.preview.config(text=("Equivale a  " + "  ·  ".join(parts) + "  desde el precio de entrada.") if parts else "")
+
+    def save(self):
+        try:
+            emerg = float(self.emerg.get().replace(",", "."))
+            pip = float(self.pip.get().replace(",", "."))
+            late = int(float(self.late.get()))
+            tp = ", ".join(f"{p:g}" for p in parse_pip_list(self.tp.get()))
+        except ValueError as e:
+            return messagebox.showwarning("Revisa los datos", f"Hay un número que no se entiende: {e}")
+        trial = ChannelCfg(self.ch.num, self.ch.ref, self.ch.title, self.ch.enabled, self.ch.lot_size, self.ch.max_tps,
+                           self.two.get(), emerg, tp, pip, late)
+        errs = sl.validate_channel(sl.Settings(channels=[trial]))
+        if errs:
+            return messagebox.showwarning("Revisa los datos", "\n".join(errs))
+        if trial.entry_then_sl and emerg == 0 and not messagebox.askyesno(
+                "Sin SL de emergencia",
+                "Sin SL de emergencia, la operación quedará SIN ninguna protección entre el primer mensaje y el SL del "
+                "canal (y para siempre si el canal no lo manda).\n\n¿Seguro que quieres continuar?", icon="warning"):
+            return
+        for f in ("entry_then_sl", "emergency_sl_pips", "tp_pips", "pip_size", "late_sl_min"):
+            setattr(self.ch, f, getattr(trial, f))
+        self.on_save()
+        self.destroy()
+
+
 class ChannelStep(Step):
     title, short = "Elegir los canales", "Canales"
     ALL = "Todos mis canales y grupos"
@@ -456,9 +563,9 @@ class ChannelStep(Step):
         ttk.Label(act, text="o escribe un @usuario:", style="Muted.TLabel").pack(side="right")
 
         ttk.Label(self, text="Canales elegidos", style="H2.TLabel").pack(anchor="w", pady=(10, 4))
-        self.chosen = make_tree(self, ("on", "name", "lot", "tps"),
-                                (("on", "Activo", 74), ("name", "Canal", 330), ("lot", "Lote total", 100),
-                                 ("tps", "TPs", 100)), height=3)
+        self.chosen = make_tree(self, ("on", "name", "lot", "tps", "mode"),
+                                (("on", "Activo", 74), ("name", "Canal", 270), ("lot", "Lote total", 86),
+                                 ("tps", "TPs", 70), ("mode", "Señales", 110)), height=3)
         self.chosen.bind("<Button-1>", lambda e: self.on_click(self.chosen, e, self.toggle_enabled))
         self.chosen.bind("<<TreeviewSelect>>", self.on_pick)
 
@@ -475,6 +582,7 @@ class ChannelStep(Step):
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda e: self.apply_edit())
         ttk.Button(ed, text="Quitar canal", command=self.remove_selected).pack(side="right")
+        ttk.Button(ed, text="Ajustes avanzados…", command=self.open_advanced).pack(side="right", padx=8)
         ttk.Label(self, text="Lote vacío o TPs «General» = se usan los ajustes de «Cómo operar».",
                   style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         self.st = self.status()
@@ -509,7 +617,7 @@ class ChannelStep(Step):
     @staticmethod
     def chosen_values(c: ChannelCfg):
         return ("☑" if c.enabled else "☐", c.title or c.ref, f"{c.lot_size:g}" if c.lot_size else "General",
-                str(c.max_tps) if c.max_tps else "General")
+                str(c.max_tps) if c.max_tps else "General", "2 mensajes" if c.entry_then_sl else "Normal")
 
     def refresh_all(self):
         keep = self.sel_num
@@ -615,6 +723,13 @@ class ChannelStep(Step):
         c.max_tps = int(tps) if tps.isdigit() else 0
         if self.chosen.exists(str(c.num)):
             self.chosen.item(str(c.num), values=self.chosen_values(c))
+
+    def open_advanced(self, modal: bool = True):
+        c = self.by_num(self.sel_num)
+        if c is None:
+            self.set_status(self.st, "Marca primero un canal en «Canales elegidos».", "warn")
+            return None
+        return ChannelDialog(self.app, c, lambda: self.refill_chosen(c.num), modal=modal)
 
     def remove_selected(self):
         c = self.by_num(self.sel_num)
@@ -1160,8 +1275,11 @@ class BacktestStep(Step):
                   "--max-tps", str(ch.max_tps or s.max_tps),
                   "--balance", str(bal), "--report-tz", f"{s.tz_offset_hours:g}",
                   "--report", str(self.report_path(ch)),
-                  "--out", str(data_dir() / f"backtest_trades_c{ch.num}.csv")]
-                 + (["--us-dst"] if self.dst.get() else [])]
+                  "--out", str(data_dir() / f"backtest_trades_c{ch.num}.csv"),
+                  "--pip-size", f"{ch.pip_size:g}", "--late-sl-min", str(ch.late_sl_min)]
+                 + (["--us-dst"] if self.dst.get() else [])
+                 + (["--tp-pips", ch.tp_pips] if ch.tp_pips.strip() else [])
+                 + (["--entry-then-sl", "--emergency-sl-pips", f"{ch.emergency_sl_pips:g}"] if ch.entry_then_sl else [])]
 
         def work():
             for args in steps:
@@ -1374,7 +1492,8 @@ class PanelStep(Step):
         ctl = self.control().read()
         chans = "; ".join(
             f"{c.title or c.ref} (lote {c.lot_size or s.lot_size:g}"
-            f"{', ' + str(c.max_tps) + ' TP' if c.max_tps else ''}{'' if c.enabled else ', DESACTIVADO'}"
+            f"{', ' + str(c.max_tps) + ' TP' if c.max_tps else ''}{', 2 mensajes' if c.entry_then_sl else ''}"
+            f"{'' if c.enabled else ', DESACTIVADO'}"
             f"{', EN PAUSA' if c.num in ctl['paused_channels'] else ''})"
             for c in s.channels) or "—"
         prot = []

@@ -16,7 +16,8 @@ import time
 from typing import List, Optional
 
 from .parser import Command, Signal
-from .planner import OrderPlan, Skip, apply_stops_level, plan_orders
+from .channels import parse_pip_list
+from .planner import OrderPlan, Skip, apply_stops_level, fill_defaults, plan_orders
 from .risk import seconds_into_day
 
 log = logging.getLogger("trader")
@@ -252,6 +253,16 @@ class Trader:
             self.outcome = ("ignorada", why)
             self.notify(f"⚠️ {who}Señal {msg_id} ignorada: {why}", "warn")
             return 0
+        # Señal sin SL/TP (canales que mandan la dirección primero y el SL después): se completa con
+        # el SL de emergencia y el TP por defecto del canal, medidos en pips desde la entrada.
+        pip = ch.get("pip_size") or 0.10
+        emergency = float(ch.get("emergency_sl_pips") or 0) if ch.get("entry_then_sl") else 0.0
+        try:
+            tp_defaults = parse_pip_list(ch.get("tp_pips", ""))
+        except ValueError:
+            tp_defaults = []
+        provisional_sl = sig.sl is None and emergency > 0
+        sig = fill_defaults(sig, tick.bid, tick.ask, emergency, tp_defaults, pip)
         try:
             plans = plan_orders(
                 sig, tick.bid, tick.ask,
@@ -318,11 +329,14 @@ class Trader:
             label = f"{p.side} {p.kind} {vol} lotes TP={p.tp or '-'} (msg {msg_id})"
             sent += self._send(req, label, guard=(p.kind == "market"))
         tps = ", ".join(str(p.tp) if p.tp else "-" for p in plans)
+        wait_sl = (f"\n⏳ SL de EMERGENCIA a {emergency:g} pips ({emergency * pip:g} USD): se reemplazará cuando el "
+                   f"canal mande su SL (hasta {ch.get('late_sl_min', 30)} min)." if provisional_sl else "")
         self.notify(f"{'✅' if sent == len(plans) else '⚠️'} {who}Señal {msg_id}: {plans[0].side} "
                     f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
-                    f"SL {plans[0].sl} | TP {tps}", "info")
+                    f"SL {plans[0].sl}{' (emergencia)' if provisional_sl else ''} | TP {tps}{wait_sl}", "info")
         self.outcome = (("operada" if sent == len(plans) else "error" if sent == 0 else "parcial"),
-                        f"{sent}/{len(plans)} órdenes {plans[0].side} {plans[0].kind} | SL {plans[0].sl} | TP {tps}")
+                        f"{sent}/{len(plans)} órdenes {plans[0].side} {plans[0].kind} | SL {plans[0].sl}"
+                        f"{' (emergencia)' if provisional_sl else ''} | TP {tps}")
         if sent and self.guard is not None:
             self.guard.register_signal()
         return sent
@@ -470,6 +484,64 @@ class Trader:
             self._set_sl(num, msg_id, None)
         elif cmd.kind == "move_sl":
             self._set_sl(num, msg_id, cmd.value)
+        elif cmd.kind == "set_sl":
+            self.late_sl(cmd, num, msg_id, channel or {})
+
+    def late_sl(self, cmd: Command, num, msg_id, ch: dict) -> int:
+        """SL que el canal manda DESPUÉS de la entrada. Se aplica a la señal a la que responde el mensaje o,
+        si no responde a ninguna, a la entrada más reciente de ESE canal dentro de `late_sl_min` minutos.
+        Si el precio ya superó ese SL, la operación se cierra (es lo que habría pasado con el SL puesto)."""
+        m = self.mt5
+        tick = m.symbol_info_tick(self.symbol)
+        who = f"[{ch['title']}] " if ch.get("title") else ""
+        pip = ch.get("pip_size") or 0.10
+        window = (ch.get("late_sl_min") or 30) * 60
+        if tick is None:
+            return 0
+        if msg_id:
+            group = self.positions(num, msg_id)
+        else:
+            mine = self.positions(num)
+            tags: dict = {}
+            for p in mine:
+                tags.setdefault(p.comment.split(":")[0], []).append(p)
+            group = max(tags.values(), key=lambda ps: max(getattr(p, "time", 0) for p in ps)) if tags else []
+            if group and tick.time - max(getattr(p, "time", 0) for p in group) > window:
+                self.notify(f"⚠️ {who}Llegó un SL pero la última entrada de este canal tiene más de "
+                            f"{window // 60} min: no se aplicó a nada.", "warn")
+                return 0
+        if not group:
+            self.notify(f"⚠️ {who}Llegó un SL pero no hay una operación abierta reciente de este canal.", "warn")
+            return 0
+        digits, md, done = self.si.digits, self.min_stop_distance(), 0
+        for p in group:
+            buy = p.type == m.POSITION_TYPE_BUY
+            new_sl = round((p.price_open - (1 if buy else -1) * cmd.value * pip) if cmd.pips else cmd.value, digits)
+            price = tick.bid if buy else tick.ask                       # precio al que se cerraría
+            if (buy and price <= new_sl) or (not buy and price >= new_sl):
+                self._send({"action": m.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": p.volume,
+                            "type": m.ORDER_TYPE_SELL if buy else m.ORDER_TYPE_BUY, "position": p.ticket,
+                            "price": price, "deviation": self.cfg["deviation"], "magic": self.magic,
+                            "comment": p.comment[:31]}, f"cerrar posición {p.ticket}: el precio ya superó el SL {new_sl}")
+                self.notify(f"🛑 {who}El precio ya superó el SL {new_sl}: se cerró la operación {p.ticket}.", "info")
+                done += 1
+                continue
+            gap = (price - new_sl) if buy else (new_sl - price)
+            if gap < md:
+                self.notify(f"⚠️ {who}No se pudo poner el SL {new_sl} en la operación {p.ticket}: queda a {gap:.2f} del "
+                            f"precio y el broker exige {md:.2f}. Se deja el SL anterior.", "warn")
+                continue
+            if abs(new_sl - p.sl) < 10 ** -digits:
+                done += 1
+                continue
+            ok = self._send({"action": m.TRADE_ACTION_SLTP, "symbol": self.symbol, "position": p.ticket,
+                             "sl": new_sl, "tp": p.tp, "magic": self.magic},
+                            f"SL del canal posición {p.ticket} -> {new_sl}")
+            done += bool(ok)
+            if ok:
+                self.notify(f"🛡 {who}SL del canal aplicado a la operación {p.ticket}: {new_sl} "
+                            f"({'%g pips' % cmd.value if cmd.pips else 'precio'}).", "info")
+        return done
 
     def _cancel(self, num, msg_id) -> None:
         m = self.mt5

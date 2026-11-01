@@ -174,7 +174,7 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
             msg_id = event.message.id
             log.info("%sMensaje %s: %r", who, msg_id, text[:200])
             rec = dict(channel=ch["num"], title=ch["title"], msg_id=msg_id, text=text)
-            res = parse(text)
+            res = parse(text, entry_then_sl=bool(ch.get("entry_then_sl")))
             if not res:
                 if looks_like_signal(text):          # parece una señal pero no se entendió: no ignorarla en silencio
                     inbox.add(status="revisar", detail="parece una señal pero no la entendí", **rec)
@@ -203,8 +203,9 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
                     scope = event.message.reply_to_msg_id
                     for c in res.commands:
                         trader.handle_command(c, scope, ch)
-                    inbox.add(status="comando", detail=", ".join(c.kind for c in res.commands)
-                              + (f" (señal {scope})" if scope else " (todo el canal)"), **rec)
+                    inbox.add(status="comando", detail=", ".join(
+                        f"SL del canal {c.value:g}{' pips' if c.pips else ''}" if c.kind == "set_sl" else c.kind
+                        for c in res.commands) + (f" (señal {scope})" if scope else " (todo el canal)"), **rec)
                 else:
                     inbox.add(status="ignorada", detail="comandos del canal desactivados", **rec)
             except Exception as e:

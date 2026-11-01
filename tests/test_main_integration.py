@@ -176,6 +176,39 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertIn("No entiendo", replies["volar"])
         self.assertEqual(json.loads(Path("control.json").read_text())["paused_channels"], [])   # /reanudar 1
 
+    def test_two_message_channel_opens_on_direction_then_applies_the_channels_sl(self):
+        chans = [ChannelCfg(1, "-1001", "FxStreet", entry_then_sl=True, tp_pips="30", emergency_sl_pips=100),
+                 ChannelCfg(2, "@pro", "Normal")]
+
+        async def scenario(c):
+            on_msg = self.handler(c, False)
+            await on_msg(channel_event(-1002, "SELL", 50))                       # canal NORMAL: «SELL» suelto no es una señal
+            n0 = len(self.fake.sent)
+            await on_msg(channel_event(-1001, "SELL", 60))                       # canal de 2 mensajes: se abre YA
+            self.opened = [r for r in self.fake.sent[n0:] if "position" not in r]
+            self.fake.pos = [position(41, "SELL", 2650.0, sl=2660.0, tp=2647.0, volume=0.02, comment="tg1.60:1")]
+            n1 = len(self.fake.sent)
+            await on_msg(channel_event(-1001, "SL 2655", 61))                    # llega el SL del canal
+            self.after_sl = self.fake.sent[n1:]
+            self.fake.pos = [position(41, "SELL", 2650.0, sl=2655.0, tp=2647.0, volume=0.02, comment="tg1.60:1")]
+            n2 = len(self.fake.sent)
+            await on_msg(channel_event(-1001, "SL 20 pips", 62))                 # y luego lo ajusta en pips
+            self.after_pips = self.fake.sent[n2:]
+            await asyncio.sleep(0.05)
+        client = self.run_bot(scenario, channels=chans)
+        self.assertEqual(len(self.opened), 1)
+        r = self.opened[0]
+        self.assertEqual((r["action"], r["type"], r["comment"], r["sl"], r["tp"], r["volume"]),
+                         (1, 1, "tg1.60:1", 2660.0, 2647.0, 0.02))               # SL de emergencia 10 USD, TP 3 USD (30 pips)
+        self.assertEqual([(x["action"], x["position"], x["sl"]) for x in self.after_sl], [(6, 41, 2655.0)])
+        self.assertEqual([(x["action"], x["sl"]) for x in self.after_pips], [(6, 2652.0)])      # 20 pips = 2 USD sobre 2650
+        rows = [(r["channel"], r["msg_id"], r["status"]) for r in self.inbox()]
+        self.assertEqual(rows, [(1, 60, "operada"), (1, 61, "comando"), (1, 62, "comando")])    # el «SELL» del canal normal no aparece
+        self.assertIn("SL del canal 2655", [r["detail"] for r in self.inbox()][1])
+        texts = " ".join(t for _, t in client.sent)
+        self.assertIn("SL de EMERGENCIA a 100 pips", texts)
+        self.assertIn("SL del canal aplicado", texts)
+
     def test_daily_limit_blocks_and_housekeeping_keeps_running(self):
         async def scenario(c):
             on_msg = self.handler(c, False)
