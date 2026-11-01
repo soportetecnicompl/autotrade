@@ -37,13 +37,31 @@ class ParserTests(unittest.TestCase):
         s = parse("XAUUSD SELL NOW SL 2662 TP1 2640").signal
         self.assertIsNone(s.entry_low)
 
+    def test_real_channel_formats(self):
+        s = parse("SELL GOLD  3912 -  3917\n\nTakeprofit1 = 3902\nTakeprofit2 = 3892\n"
+                  "Takeprofit3 = 3812\n\nStoploss = 3932").signal
+        self.assertEqual((s.side, s.entry_low, s.entry_high, s.sl), ("SELL", 3912.0, 3917.0, 3932.0))
+        self.assertEqual(s.tps, [3902.0, 3892.0, 3812.0])
+        s = parse("IC GOLD👑️ VIP:\nSELL GOLD limit 3915.5 - 3919\n\nStoploss 3925\n\n"
+                  "TP 3902 - 3890\n\nNote : use small lot").signal
+        self.assertEqual((s.kind, s.entry_low, s.entry_high, s.sl), ("limit", 3915.5, 3919.0, 3925.0))
+        self.assertEqual(s.tps, [3902.0, 3890.0])
+
+    def test_real_channel_updates(self):
+        for txt in ["45 pips, running SELL", "80 pips , 🔥🔥", "Not miss again 😡😡😡😡",
+                    "160 pips ✅✅✅"]:
+            self.assertFalse(parse(txt), txt)
+        self.assertEqual([c.kind for c in parse("110 pips, now can set BE").commands], ["breakeven"])
+        self.assertEqual([c.kind for c in parse("230 pips , close all").commands], ["close", "cancel"])
+        self.assertEqual([c.kind for c in parse("Close all signal limit").commands], ["close", "cancel"])
+
     def test_chatter_is_ignored(self):
         self.assertFalse(parse("Buyers are strong today, good morning team!"))
         self.assertFalse(parse("Sell the rumor, buy the news"))
 
     def test_commands(self):
         self.assertEqual([c.kind for c in parse("Move SL to BE").commands], ["breakeven"])
-        self.assertEqual([c.kind for c in parse("close all").commands], ["close"])
+        self.assertEqual([c.kind for c in parse("close all").commands], ["close", "cancel"])
         c = parse("TP1 hit. Close half and move to BE").commands
         self.assertEqual([(x.kind, x.value) for x in c], [("partial", 0.5), ("breakeven", None)])
         c = parse("Move SL to 2652").commands

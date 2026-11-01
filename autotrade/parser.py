@@ -14,13 +14,16 @@ NUM_ANY = r"(\d+(?:\.\d+)?)"
 
 SIDE_RE = re.compile(
     r"\b(BUY|SELL|LONG|SHORT|COMPRAR?|VENDER?|COMPRA|VENTA)\b"
+    r"(?:\s+(?:XAUUSD|XAU|GOLD|ORO))?"   # "SELL GOLD limit 3915"
     r"(?:\s+(LIMIT|STOP))?"
 )
 SL_RE = re.compile(r"(?:\bSL|STOP\s*LOSS|STOPLOSS)\s*[:@=\-]?\s*" + NUM_ANY)
 # "TP1 2655" / "TP 2655" / "TAKE PROFIT 2: 2660". El (?:\d\b)? evita comerse
 # el primer dígito del precio en "TP 2655".
+# También lista de TPs: "TP 3902 - 3890" o "TP 3902 / 3890".
 TP_RE = re.compile(
-    r"(?:\bTP|TAKE\s*PROFIT|TARGET)\s*(?:\d\b)?\s*[:@=\-]?\s*" + NUM_ANY
+    r"(?:\bTP|TAKE\s*PROFIT|TARGET)\s*(?:\d\b)?\s*[:@=\-]?\s*"
+    r"(" + NUM_ANY + r"(?:\s*[-/,]\s*" + NUM_ANY + r")*)"
 )
 CUT_RE = re.compile(r"\bSL\b|STOP\s*LOSS|STOPLOSS|\bTP\b|\bTP\d|TAKE\s*PROFIT|TARGET")
 ENTRY_RE = re.compile(NUM + r"(?:\s*[-/–]\s*" + NUM + r")?")
@@ -85,7 +88,8 @@ def parse_signal(text: str) -> Optional[Signal]:
         return None
 
     sl_m = SL_RE.search(t)
-    tps = [float(x) for x in TP_RE.findall(t)]
+    tps = [float(x) for m_ in TP_RE.finditer(t)
+           for x in re.findall(r"\d+(?:\.\d+)?", m_.group(1))]
     # Evita falsos positivos tipo "buyers are taking profit": exige SL o TP.
     if not sl_m and not tps:
         return None
@@ -120,8 +124,9 @@ def parse_commands(text: str) -> List[Command]:
             cmds.append(Command("partial", frac))
     elif CLOSE_ALL_RE.search(t) or t.strip() in {"CLOSE", "CERRAR"}:
         cmds.append(Command("close"))
+        cmds.append(Command("cancel"))  # "close all" también borra pendientes
 
-    if CANCEL_RE.search(t):
+    if CANCEL_RE.search(t) and not any(c.kind == "cancel" for c in cmds):
         cmds.append(Command("cancel"))
 
     sm = MOVE_SL_RE.search(t)
