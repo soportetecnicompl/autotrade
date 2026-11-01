@@ -27,6 +27,10 @@ class Trader:
         self.magic: int = cfg["magic"]
         self.mt5 = None
         self.si = None
+        self.account_desc = ""
+        self._init_kw: dict = {}
+        # notify(texto, nivel) la asigna main.py; por defecto no hace nada
+        self.notify = lambda text, level="info": None
 
     # ---------------------------------------------------------------- conexión
     def connect(self) -> None:
@@ -44,6 +48,7 @@ class Trader:
         if self.cfg.get("login"):
             kw.update(login=int(self.cfg["login"]), password=self.cfg["password"],
                       server=self.cfg["server"])
+        self._init_kw = kw
         if not mt5.initialize(**kw):
             raise SystemExit(f"mt5.initialize falló: {mt5.last_error()}")
         self.si = mt5.symbol_info(self.symbol)
@@ -56,13 +61,33 @@ class Trader:
             mt5.symbol_select(self.symbol, True)
             self.si = mt5.symbol_info(self.symbol)
         acc = mt5.account_info()
-        log.info("MT5 conectado: cuenta %s en %s (%s) balance=%.2f %s",
-                 acc.login, acc.server,
-                 "DEMO" if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO else "REAL/CONCURSO",
-                 acc.balance, acc.currency)
+        kind = "DEMO" if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO else "REAL/CONCURSO"
+        self.account_desc = (f"cuenta {acc.login} en {acc.server} ({kind}), "
+                             f"balance {acc.balance:.2f} {acc.currency}")
+        log.info("MT5 conectado: %s", self.account_desc)
         if not mt5.terminal_info().trade_allowed:
             log.warning("El botón 'Algo Trading' del terminal está apagado: "
                         "no se podrán enviar órdenes.")
+
+    def health(self) -> tuple:
+        """(ok, motivo, reconectable)"""
+        m = self.mt5
+        ti, ai = m.terminal_info(), m.account_info()
+        if ti is None or ai is None:
+            return False, "el terminal MT5 no responde", True
+        if not ti.connected:
+            return False, "MT5 perdió la conexión con el broker", False
+        if not ti.trade_allowed:
+            return False, "el botón 'Algo Trading' está apagado en MT5", False
+        return True, "ok", False
+
+    def reconnect(self) -> bool:
+        try:
+            self.mt5.shutdown()
+            return bool(self.mt5.initialize(**self._init_kw))
+        except Exception:  # noqa: BLE001
+            log.exception("Reconexión a MT5 falló")
+            return False
 
     def shutdown(self) -> None:
         if self.mt5:
@@ -138,6 +163,7 @@ class Trader:
             res = m.order_send(req)
             if res is None:
                 log.error("%s: order_send devolvió None (%s)", label, m.last_error())
+                self.notify(f"❌ {label}: MT5 no respondió ({m.last_error()})", "error")
                 return False
             if res.retcode in (m.TRADE_RETCODE_DONE, m.TRADE_RETCODE_PLACED):
                 log.info("%s OK ticket=%s", label, res.order or res.deal)
@@ -145,7 +171,9 @@ class Trader:
             if res.retcode == m.TRADE_RETCODE_INVALID_FILL:
                 continue
             log.error("%s FALLÓ retcode=%s %s", label, res.retcode, res.comment)
+            self.notify(f"❌ {label} FALLÓ: {res.comment} (código {res.retcode})", "error")
             return False
+        self.notify(f"❌ {label} FALLÓ: ningún modo de llenado aceptado", "error")
         log.error("%s FALLÓ: ningún modo de llenado aceptado", label)
         return False
 
@@ -156,6 +184,7 @@ class Trader:
         tick = m.symbol_info_tick(self.symbol)
         if tick is None:
             log.error("Sin precio para %s", self.symbol)
+            self.notify(f"❌ Señal {msg_id} no operada: sin precio de {self.symbol}", "error")
             return 0
         try:
             plans = plan_orders(
@@ -166,12 +195,15 @@ class Trader:
             )
         except Skip as e:
             log.warning("Señal %s ignorada: %s", msg_id, e)
+            self.notify(f"⚠️ Señal {msg_id} ignorada: {e}", "warn")
             return 0
 
         open_now = len(self.positions()) + len(self.orders())
         if open_now + len(plans) > c["max_open_positions"]:
             log.warning("Señal %s ignorada: límite max_open_positions=%s (hay %s)",
                         msg_id, c["max_open_positions"], open_now)
+            self.notify(f"⚠️ Señal {msg_id} ignorada: ya hay {open_now} operaciones/pendientes "
+                        f"(máximo {c['max_open_positions']})", "warn")
             return 0
 
         vols = self._split_volumes(self._total_volume(plans[0]), len(plans))
@@ -211,6 +243,10 @@ class Trader:
                                expiration=int(tick.time + c["pending_expiry_min"] * 60))
             label = f"{p.side} {p.kind} {vol} lotes TP={p.tp or '-'} (msg {msg_id})"
             sent += self._send(req, label)
+        tps = ", ".join(str(p.tp) if p.tp else "-" for p in plans)
+        self.notify(f"{'✅' if sent == len(plans) else '⚠️'} Señal {msg_id}: {plans[0].side} "
+                    f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
+                    f"SL {plans[0].sl} | TP {tps}", "info")
         return sent
 
     # ------------------------------------------------------------- comandos
@@ -219,6 +255,7 @@ class Trader:
         None = aplica a todas las posiciones del bot."""
         scope = f"señal {msg_id}" if msg_id else "todas las del bot"
         log.info("Comando %s %s (%s)", cmd.kind, cmd.value or "", scope)
+        self.notify(f"🔧 Comando del canal: {cmd.kind} {cmd.value or ''} ({scope})", "info")
         if cmd.kind == "cancel":
             self._cancel(msg_id)
         elif cmd.kind == "close":

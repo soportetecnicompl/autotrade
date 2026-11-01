@@ -54,6 +54,34 @@ Edita `config.ini` (nunca lo subas a git; ya está en `.gitignore`).
 
 Tests: `python -m unittest discover -s tests -t .`
 
+## Avisos por Telegram
+
+Con `[alerts] enabled = true` el bot te escribe a tu propio chat de **Mensajes guardados** (no hace falta crear otro bot):
+
+| Aviso | Nivel |
+|---|---|
+| 🟢 Bot iniciado / 🔁 reiniciado automáticamente (con modo, cuenta MT5, canal, lote, horario) | siempre |
+| ❌ Orden fallida, sin precio, 💥 error procesando un mensaje o caída del bot | siempre |
+| 🔴/🟢 MT5 desconectado del broker, sin respuesta o con *Algo Trading* apagado / recuperado | siempre |
+| ✅ Señal operada (órdenes, lotes, SL, TP) y 🔧 comandos del canal aplicados | `notify_signals` |
+| ⚠️ Señal ignorada (fuera de horario, SL inválido, sin TP, límite de posiciones, retraso) | `notify_skips` |
+
+En `dry_run` todos los avisos llevan el prefijo `[DRY-RUN]`. El bot revisa MT5 cada `mt5_check_seconds` e intenta reconectar solo si el terminal no responde.
+
+**Si el equipo se apaga o pierde internet, el bot no puede avisarte** (está apagado). Para eso existe el *latido*: crea un chequeo en un servicio como healthchecks.io (verifica su plan gratuito y condiciones), pega su URL en `heartbeat_url` y configúralo para que te avise (correo o Telegram) si pasan más de ~10 minutos sin ping. El bot solo hace ping cuando Telegram **y** MT5 están sanos, así que cubre también esos casos.
+
+## Arranque automático (Windows)
+
+`scripts/run_bot.bat` ejecuta el bot y lo reinicia a los 15 s si se cae por error o desconexión. Ctrl+C lo detiene de verdad (responde `S`/`Y` a "¿Terminar el trabajo por lotes?"). Para que arranque solo con Windows:
+
+1. Instala la tarea: `powershell -ExecutionPolicy Bypass -File scripts\install_autostart.ps1`
+   (quitarla: mismo comando con `-Uninstall`). Se lanza al **iniciar sesión**, con 30 s de espera, y abre una ventana con el bot. Si pones `path` a `terminal64.exe` en `config.ini`, el bot también abre MT5 si no está corriendo.
+2. **Inicio de sesión automático**: MT5 es una app de escritorio, así que la tarea solo corre con la sesión abierta. Configura el autologin con la herramienta *Autologon* de Sysinternals o `netplwiz`. Ojo: deja la contraseña recuperable en el equipo; úsalo solo en un equipo de acceso físico controlado y con una cuenta de Windows dedicada.
+3. En el **BIOS**: activa "Restore on AC Power Loss" para que el equipo encienda solo al volver la luz. En Windows: sin suspensión/hibernación y horario activo para actualizaciones.
+4. Prueba el ciclo completo: reinicia el equipo y comprueba que llega el aviso "🔁 Bot REINICIADO" sin tocar nada.
+
+> Los scripts de Windows (`.bat` y `.ps1`) no pudieron ejecutarse en el entorno donde se desarrollaron (Linux). Pruébalos primero con el bot en `dry_run`.
+
 ## Filtro de horario
 
 En `config.ini`, sección `[filters]`, limitas en qué días y horas se aceptan señales **nuevas**:
