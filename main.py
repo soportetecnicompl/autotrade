@@ -36,7 +36,7 @@ def load_config(path: str) -> dict:
         "dry_run": r.getboolean("dry_run", True),
         "lot_size": r.getfloat("lot_size", 0.01),
         "risk_percent": r.getfloat("risk_percent", 0.0),
-        "max_tps": r.getint("max_tps", 3),
+        "max_tps": r.getint("max_tps", 2),
         "max_open_positions": r.getint("max_open_positions", 6),
         "market_tolerance": r.getfloat("market_tolerance", 1.5),
         "max_pending_distance": r.getfloat("max_pending_distance", 30.0),

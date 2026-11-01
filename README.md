@@ -6,7 +6,7 @@ Lee un canal de Telegram con tu cuenta, interpreta las señales y las opera en t
 
 | Mensaje del canal | Acción |
 |---|---|
-| `XAUUSD BUY NOW @ 2650 SL 2640 TP1 2655 TP2 2660` | Abre una orden por cada TP (máx. `max_tps`) |
+| `XAUUSD BUY NOW @ 2650 SL 2640 TP1 2655 TP2 2660` | Abre una orden por cada TP (máx. `max_tps`, por defecto 2); `lot_size` es el lote total y se reparte entre ellas |
 | `GOLD SELL 2650-2655 ...` | Rango: entra a mercado si el precio está en la zona, si no deja pendiente en el borde |
 | `BUY LIMIT 2640 ...` / `SELL STOP ...` | Orden pendiente (con vencimiento `pending_expiry_min`) |
 | `Move SL to BE` / `break even` | SL a precio de apertura (solo posiciones ya en ganancia) |

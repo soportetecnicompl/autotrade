@@ -94,17 +94,28 @@ class Trader:
         vol = min(max(vol, vmin), vmax)
         return round(vol, max(0, -int(math.floor(math.log10(step)))))
 
-    def _volume(self, plan: OrderPlan, n_orders: int) -> float:
+    def _total_volume(self, plan: OrderPlan) -> float:
+        """Lote TOTAL de la señal (fijo, o por % de riesgo sobre la equity)."""
         risk_pct = self.cfg["risk_percent"]
-        if risk_pct <= 0:
-            return self._norm_volume(self.cfg["lot_size"])
-        equity = self.mt5.account_info().equity
-        per_order_risk = equity * risk_pct / 100 / n_orders
-        loss_per_lot = (abs(plan.price - plan.sl) / self.si.trade_tick_size
-                        * self.si.trade_tick_value)
-        if loss_per_lot <= 0:
-            return self._norm_volume(self.cfg["lot_size"])
-        return self._norm_volume(per_order_risk / loss_per_lot)
+        if risk_pct > 0:
+            loss_per_lot = (abs(plan.price - plan.sl) / self.si.trade_tick_size
+                            * self.si.trade_tick_value)
+            if loss_per_lot > 0:
+                equity = self.mt5.account_info().equity
+                return equity * risk_pct / 100 / loss_per_lot
+        return self.cfg["lot_size"]
+
+    def _split_volumes(self, total: float, n: int) -> List[float]:
+        """Reparte `total` en hasta n órdenes, cada una >= volume_min.
+        El sobrante por redondeo va a la primera orden (TP más cercano)."""
+        step, vmin = self.si.volume_step, self.si.volume_min
+        n = max(1, min(n, int(math.floor(total / vmin + 1e-9))))
+        per = self._norm_volume(total / n)
+        vols = [per] * n
+        extra = math.floor((total - per * n) / step + 1e-9) * step
+        if extra > 0:
+            vols[0] = self._norm_volume(vols[0] + extra)
+        return vols
 
     def _fillings(self) -> list:
         m, mask = self.mt5, self.si.filling_mode
@@ -163,11 +174,16 @@ class Trader:
                         msg_id, c["max_open_positions"], open_now)
             return 0
 
+        vols = self._split_volumes(self._total_volume(plans[0]), len(plans))
+        if len(vols) < len(plans):
+            log.warning("Lote total insuficiente para %s órdenes (mínimo %s): se abren %s",
+                        len(plans), self.si.volume_min, len(vols))
+        plans = plans[:len(vols)]
+
         sent = 0
         digits = self.si.digits
-        for n, p in enumerate(plans, 1):
+        for n, (p, vol) in enumerate(zip(plans, vols), 1):
             buy = p.side == "BUY"
-            vol = self._volume(p, len(plans))
             req = {
                 "symbol": self.symbol, "volume": vol,
                 "sl": round(p.sl, digits), "tp": round(p.tp, digits),
