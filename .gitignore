@@ -1,0 +1,6 @@
+config.ini
+*.session
+*.session-journal
+autotrade.log
+__pycache__/
+.venv/
