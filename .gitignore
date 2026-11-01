@@ -7,3 +7,8 @@ __pycache__/
 history.json
 backtest_trades.csv
 report.html
+build/
+dist/
+dist-installer/
+.venv-build/
+*.spec

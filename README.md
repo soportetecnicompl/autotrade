@@ -2,6 +2,24 @@
 
 Lee un canal de Telegram con tu cuenta, interpreta las señales y las opera en tu cuenta MT5.
 
+## Instalador gráfico para Windows (recomendado)
+
+`AutoTrade.exe` incluye un **asistente paso a paso** (Bienvenida → Telegram → Canal → MetaTrader 5 → Operativa → Horario → Avisos → Probar un mensaje → Analizar el canal → Inicio automático → Panel). No hace falta usar la terminal ni editar archivos: el asistente conecta tu Telegram (con el código que te llega), te deja **elegir el canal de una lista**, prueba MetaTrader 5, guarda la configuración, lanza el análisis del canal y activa el arranque automático. Al final queda un **panel** con los botones Iniciar/Detener, el modo (simulación/real) y el registro en vivo.
+
+**Conseguir el instalador** (necesitas un PC con Windows o GitHub; yo no puedo compilar para Windows desde Linux):
+
+- *Sin tener que instalar nada:* en GitHub abre la pestaña **Actions → Build Windows installer → Run workflow**; al terminar descarga el artefacto `AutoTrade-Setup` (contiene `AutoTrade-Setup-x.y.z.exe`).
+- *En un Windows con Python 3.12:* ejecuta `installer\build_windows.bat` (compila `dist\AutoTrade\AutoTrade.exe` y, si tienes [Inno Setup 6](https://jrsoftware.org/isdl.php), el instalador en `dist-installer\`).
+
+**Detalles útiles**
+
+- Se instala por usuario (sin pedir administrador). Tus datos (`config.ini`, sesión de Telegram, registro, informes) viven en `%APPDATA%\AutoTrade` y **se conservan al desinstalar**; el desinstalador detiene el bot y quita el inicio automático.
+- El ejecutable no está firmado digitalmente: Windows SmartScreen puede mostrar «Windows protegió tu PC» (pulsa *Más información → Ejecutar de todos modos*) y algunos antivirus desconfían de los programas hechos con PyInstaller. Si te preocupa, compílalo tú mismo con el script de arriba.
+- Reabrir el programa más adelante te lleva directo al panel; puedes volver a cualquier paso desde la barra lateral.
+- Con `AutoTrade.exe --bot` el bot corre sin interfaz (con reinicio automático si se cae); `--backtest ...` usa los mismos argumentos que `backtest.py`.
+
+> **Qué se probó y qué no.** La interfaz y toda la lógica del asistente están cubiertas por pruebas automáticas (con Telegram y MT5 simulados) y se revisó visualmente en pantalla; el paquete se compiló y ejecutó en Linux para comprobar que incluye todos los módulos. **No se pudo probar en Windows**: la compilación del `.exe`, el instalador de Inno Setup, el inicio automático y la conexión real con tu Telegram y tu MetaTrader 5 son lo primero que debes verificar (en simulación y con una cuenta demo).
+
 ## Qué hace
 
 | Mensaje del canal | Acción |

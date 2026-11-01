@@ -139,7 +139,7 @@ def main() -> None:
     r.add_argument("--trading-days", default="", help='ej. "Mon-Fri"')
     r.add_argument("--out", default="backtest_trades.csv")
     r.add_argument("--report", default="report.html", help="informe HTML de salida")
-    r.add_argument("--balance", type=float, default=1000.0, help="saldo de referencia para calcular % de retorno y drawdown")
+    r.add_argument("--balance", type=float, default=1000.0, help="saldo de referencia para calcular %% de retorno y drawdown")
     r.add_argument("--min-hour-signals", type=int, default=3, help="mín. señales por hora/día para proponerlo en el filtro")
     r.add_argument("--no-sweep", action="store_true", help="omite la comparación de variantes y de retraso (más rápido)")
 

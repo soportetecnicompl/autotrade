@@ -1,0 +1,60 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version del instalador (ej. 1.0.0)"
+        default: "1.0.0"
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Pruebas (sin las de interfaz grafica, que necesitan pantalla)
+        env:
+          AUTOTRADE_SKIP_GUI: "1"
+        run: python -m unittest discover -s tests -t .
+
+      - name: Empaquetar AutoTrade.exe
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name AutoTrade --paths .
+          --collect-submodules telethon --collect-all MetaTrader5
+          --hidden-import main --hidden-import backtest app.py
+
+      - name: Prueba rapida del ejecutable (el parser dentro del paquete)
+        shell: pwsh
+        run: |
+          $env:AUTOTRADE_HOME = "$PWD\smoke"
+          $env:AUTOTRADE_OUTFILE = "$PWD\smoke.log"
+          $p = Start-Process -Wait -PassThru -FilePath ".\dist\AutoTrade\AutoTrade.exe" `
+               -ArgumentList '--bot-once --test "BUY GOLD 3900 SL 3890 TP 3910"'
+          Get-Content smoke.log
+          if ($p.ExitCode -ne 0 -or -not (Select-String -Path smoke.log -Pattern "side='BUY'" -Quiet)) { exit 1 }
+
+      - name: Instalar Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Crear el instalador
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          if (-not $v) { $v = "${{ github.ref_name }}".TrimStart("v") }
+          if (-not $v) { $v = "1.0.0" }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\autotrade.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoTrade-Setup
+          path: dist-installer/*.exe
