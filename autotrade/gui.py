@@ -25,11 +25,18 @@ from . import setup_logic as sl
 from .paths import (IS_WINDOWS, data_dir, launcher_cmd, pid_alive, popen_kwargs, stop_tree)
 from .schedule import parse_days
 from .setup_logic import Settings
+from .channels import ChannelCfg, channel_ref, next_num
 from .supervisor import PID_FILE, read_pid
 
-WRAP = 600
-ACCENT = "#2a5bd7"
-OK, BAD, WARN, MUTED = "#0f8a4f", "#c4321f", "#b26b00", "#667085"
+WRAP = 640
+# Paleta (todos los colores se definen aquí; los estilos de ttk los usan de forma explícita para
+# cada estado, porque el texto sobre fondos de color debe verse igual en todas las plataformas)
+BG, BAR, BORDER = "#ffffff", "#f3f5f9", "#d5dae6"
+TEXT, MUTED = "#1d2433", "#667085"
+ACCENT, ACCENT_DK, ACCENT_PR = "#2a5bd7", "#1f48ad", "#1a3d94"
+OK, BAD, WARN = "#0f8a4f", "#c4321f", "#a15c00"
+SIDEBAR, SIDE_ACTIVE, SIDE_HOVER = "#18202f", "#2a3650", "#222c41"
+TINT = {"ok": ("#e8f6ee", OK), "warn": ("#fff3de", WARN), "bad": ("#fdeceb", BAD), "info": ("#eaf0fd", ACCENT_DK)}
 DAYS = [("Mon", "Lun"), ("Tue", "Mar"), ("Wed", "Mié"), ("Thu", "Jue"), ("Fri", "Vie"), ("Sat", "Sáb"), ("Sun", "Dom")]
 TZ_CHOICES = ["-8", "-7", "-6", "-5", "-4", "-3", "0", "1", "2", "3"]
 SAMPLE = ("SELL GOLD  3912 -  3917\n\nTakeprofit1 = 3902\nTakeprofit2 = 3892\nTakeprofit3 = 3812\n\nStoploss = 3932")
@@ -74,6 +81,21 @@ def days_to_text(selected: set) -> str:
     return ",".join(code for i, (code, _) in enumerate(DAYS) if i in selected)
 
 
+class Banner(tk.Label):
+    """Mensaje de estado con color de fondo según el tipo (ok / warn / bad / info)."""
+
+    def __init__(self, parent):
+        super().__init__(parent, text="", anchor="w", justify="left", bg=BG, fg=MUTED, padx=14, pady=0,
+                         wraplength=WRAP - 30, bd=0, highlightthickness=0)
+
+    def show(self, msg: str, kind: str = "info") -> None:
+        if not msg:
+            self.config(text="", bg=BG, pady=0)
+            return
+        bg, fg = TINT.get(kind, TINT["info"])
+        self.config(text=msg, bg=bg, fg=fg, pady=9)
+
+
 class Step(ttk.Frame):
     title = ""
     short = ""
@@ -97,31 +119,61 @@ class Step(ttk.Frame):
     def head(self, title: str, intro: str = "") -> None:
         ttk.Label(self, text=title, style="Title.TLabel").pack(anchor="w")
         if intro:
-            ttk.Label(self, text=intro, wraplength=WRAP, justify="left", style="Muted.TLabel").pack(anchor="w", pady=(4, 10))
+            ttk.Label(self, text=intro, wraplength=WRAP, justify="left", style="Muted.TLabel").pack(anchor="w", pady=(4, 12))
 
     def text(self, msg: str, style: str = "TLabel", pady=(0, 6)) -> ttk.Label:
         l = ttk.Label(self, text=msg, wraplength=WRAP, justify="left", style=style)
         l.pack(anchor="w", pady=pady)
         return l
 
-    def row(self, label: str, name: str, show: str = "", width: int = 38, help: str = "") -> ttk.Entry:
+    def reveal_button(self, parent, entry: ttk.Entry, mask: str = "•") -> ttk.Button:
+        """Botón «Mostrar/Ocultar» para campos secretos."""
+        def toggle():
+            hidden = entry.cget("show") != ""
+            entry.config(show="" if hidden else mask)
+            btn.config(text="Ocultar" if hidden else "Mostrar")
+        btn = ttk.Button(parent, text="Mostrar", style="Small.TButton", command=toggle)
+        btn.pack(side="left", padx=(6, 0))
+        return btn
+
+    def row(self, label: str, name: str, show: str = "", width: int = 38, help: str = "",
+            reveal: bool = False) -> ttk.Entry:
         f = ttk.Frame(self)
-        f.pack(anchor="w", fill="x", pady=3)
+        f.pack(anchor="w", fill="x", pady=(5, 0 if help else 3))
         ttk.Label(f, text=label, width=22).pack(side="left")
         e = ttk.Entry(f, textvariable=self.app.v[name], show=show, width=width)
         e.pack(side="left")
+        if reveal:
+            self.reveal_button(f, e, show or "•")
         if help:
-            ttk.Label(f, text=help, style="Muted.TLabel").pack(side="left", padx=8)
+            ttk.Label(self, text=help, style="Muted.TLabel").pack(anchor="w", padx=(176, 0), pady=(2, 4))
         return e
 
-    def status(self) -> ttk.Label:
-        l = ttk.Label(self, text="", wraplength=WRAP, justify="left")
-        l.pack(anchor="w", pady=6)
-        return l
+    def status(self) -> Banner:
+        b = Banner(self)
+        b.pack(fill="x", pady=(8, 0))
+        return b
 
-    def set_status(self, label: ttk.Label, msg: str, kind: str = "info") -> None:
-        color = {"ok": OK, "bad": BAD, "warn": WARN}.get(kind, MUTED)
-        label.config(text=msg, foreground=color)
+    def set_status(self, label, msg: str, kind: str = "info") -> None:
+        if isinstance(label, Banner):
+            label.show(msg, kind)
+        else:                               # ttk.Label (filas de la comprobación inicial)
+            label.config(text=msg, foreground={"ok": OK, "bad": BAD, "warn": WARN}.get(kind, MUTED))
+
+
+def make_tree(parent, columns, specs, height: int) -> ttk.Treeview:
+    """Treeview con barra de desplazamiento. specs: [(columna, título, ancho)]."""
+    box = ttk.Frame(parent)
+    box.pack(fill="x")
+    tree = ttk.Treeview(box, columns=columns, show="headings", height=height, selectmode="browse")
+    for col, title, width in specs:
+        tree.heading(col, text=title)
+        tree.column(col, width=width, anchor="center" if width <= 60 else "w", stretch=width > 60)
+    sb = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=sb.set)
+    tree.pack(side="left", fill="x", expand=True)
+    sb.pack(side="right", fill="y")
+    return tree
 
 
 # ------------------------------------------------------------------- pasos
@@ -201,7 +253,7 @@ class TelegramStep(Step):
                   "3. Copia aquí el api_id y el api_hash que te muestra.")
         ttk.Button(self, text="Abrir my.telegram.org", command=lambda: webbrowser.open("https://my.telegram.org")).pack(anchor="w", pady=4)
         self.row("api_id", "api_id", width=20)
-        self.row("api_hash", "api_hash", width=40)
+        self.row("api_hash", "api_hash", show="•", width=40, reveal=True)
         self.row("Tu teléfono", "phone", width=20, help="con + y código de país, ej. +50499998888")
         self.send_btn = ttk.Button(self, text="Enviar código a mi Telegram", style="Accent.TButton", command=self.send_code)
         self.send_btn.pack(anchor="w", pady=(10, 4))
@@ -304,83 +356,260 @@ class TelegramStep(Step):
 
 
 class ChannelStep(Step):
-    title, short = "Elegir el canal", "Canal"
+    title, short = "Elegir los canales", "Canales"
+    ALL = "Todos mis canales y grupos"
 
     def build(self):
-        self.head("¿De qué canal copiamos las señales?",
-                  "Aquí aparecen los canales y grupos a los que estás unido. Elige el que envía las señales de oro.")
+        self.head("¿De qué canales copiamos las señales?",
+                  "Marca uno o varios canales. Usa tus carpetas de Telegram para encontrarlos más rápido. "
+                  "Cada canal puede tener su propio lote.")
+        self.dialogs: List[dict] = []
+        self.folders: List[dict] = []
+        self.visible: List[dict] = []
+        self.folder_by_label: Dict[str, dict] = {}
+        self.sel_num: Optional[int] = None
+        self._loading = False
+
         bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=4)
-        self.load_btn = ttk.Button(bar, text="Cargar mis canales", style="Accent.TButton", command=self.load)
-        self.load_btn.pack(side="left")
-        ttk.Label(bar, text="  Buscar:").pack(side="left")
+        bar.pack(fill="x", pady=(0, 8))
+        ttk.Label(bar, text="Carpeta").pack(side="left")
+        self.folder_var = tk.StringVar(value=self.ALL)
+        self.folder_cb = ttk.Combobox(bar, textvariable=self.folder_var, state="readonly", width=24, values=[self.ALL])
+        self.folder_cb.pack(side="left", padx=(8, 14))
+        self.folder_cb.bind("<<ComboboxSelected>>", lambda e: self.refill())
+        ttk.Label(bar, text="Buscar").pack(side="left")
         self.q = tk.StringVar()
         self.q.trace_add("write", lambda *_: self.refill())
-        ttk.Entry(bar, textvariable=self.q, width=24).pack(side="left")
-        cols = ("name", "kind", "user")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=9, selectmode="browse")
-        for c, t, w in (("name", "Nombre", 320), ("kind", "Tipo", 70), ("user", "@usuario", 160)):
-            self.tree.heading(c, text=t)
-            self.tree.column(c, width=w)
-        self.tree.pack(fill="x", pady=6)
-        self.tree.bind("<<TreeviewSelect>>", self.pick)
-        self.items: List[dict] = []
-        f = ttk.Frame(self)
-        f.pack(anchor="w", fill="x", pady=(6, 0))
-        ttk.Label(f, text="O escribe su @usuario:").pack(side="left")
+        ttk.Entry(bar, textvariable=self.q, width=14).pack(side="left", padx=(8, 0))
+        self.load_btn = ttk.Button(bar, text="Cargar mis canales", style="Accent.TButton", command=self.load)
+        self.load_btn.pack(side="right")
+
+        self.avail = make_tree(self, ("sel", "name", "kind", "user"),
+                               (("sel", "", 54), ("name", "Canal o grupo", 332), ("kind", "Tipo", 70),
+                                ("user", "@usuario", 150)), height=6)
+        self.avail.bind("<Button-1>", lambda e: self.on_click(self.avail, e, self.toggle_iid))
+        self.avail.bind("<Double-1>", lambda e: self.on_double(self.avail, e, self.toggle_iid))
+
+        act = ttk.Frame(self)
+        act.pack(fill="x", pady=(8, 2))
+        self.add_all_btn = ttk.Button(act, text="Agregar todos los de esta vista", command=self.add_visible)
+        self.add_all_btn.pack(side="left")
+        ttk.Button(act, text="Agregar", command=self.use_manual).pack(side="right")
         self.manual = tk.StringVar()
-        ttk.Entry(f, textvariable=self.manual, width=26).pack(side="left", padx=6)
-        ttk.Button(f, text="Usar este", command=self.use_manual).pack(side="left")
+        ttk.Entry(act, textvariable=self.manual, width=18).pack(side="right", padx=(6, 6))
+        ttk.Label(act, text="o escribe un @usuario:", style="Muted.TLabel").pack(side="right")
+
+        ttk.Label(self, text="Canales elegidos", style="H2.TLabel").pack(anchor="w", pady=(10, 4))
+        self.chosen = make_tree(self, ("on", "name", "lot", "tps"),
+                                (("on", "Activo", 74), ("name", "Canal", 330), ("lot", "Lote total", 100),
+                                 ("tps", "TPs", 100)), height=3)
+        self.chosen.bind("<Button-1>", lambda e: self.on_click(self.chosen, e, self.toggle_enabled))
+        self.chosen.bind("<<TreeviewSelect>>", self.on_pick)
+
+        ed = ttk.Frame(self)
+        ed.pack(fill="x", pady=(8, 0))
+        ttk.Label(ed, text="Ajustes del canal marcado:", style="Muted.TLabel").pack(side="left")
+        ttk.Label(ed, text="Lote").pack(side="left", padx=(12, 4))
+        self.ed_lot = tk.StringVar()
+        ttk.Entry(ed, textvariable=self.ed_lot, width=7).pack(side="left")
+        self.ed_lot.trace_add("write", lambda *_: self.apply_edit())
+        ttk.Label(ed, text="TPs").pack(side="left", padx=(12, 4))
+        self.ed_tps = tk.StringVar(value="General")
+        cb = ttk.Combobox(ed, textvariable=self.ed_tps, values=["General", "1", "2", "3"], state="readonly", width=9)
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: self.apply_edit())
+        ttk.Button(ed, text="Quitar canal", command=self.remove_selected).pack(side="right")
+        ttk.Label(self, text="Lote vacío o TPs «General» = se usan los ajustes de «Cómo operar».",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         self.st = self.status()
 
-    def on_show(self):
-        s = self.app.settings
-        if s.channel:
-            self.set_status(self.st, f"Canal elegido: {s.channel_title or s.channel}", "ok")
-        elif not self.app.tg_user:
-            self.set_status(self.st, "Primero conecta Telegram en el paso anterior.", "warn")
-        if self.app.tg_user and not self.items:
-            self.load()
+    # ---- datos
+    def channels(self):
+        return self.app.settings.channels
 
-    def load(self):
-        if not self.app.tg:
-            return self.set_status(self.st, "Primero conecta Telegram en el paso anterior.", "warn")
-        self.set_status(self.st, "Cargando tus canales…")
-
-        def ok(items):
-            self.items = items
-            self.refill()
-            self.set_status(self.st, f"{len(items)} canales/grupos. Selecciona uno de la lista." if items
-                            else "No encontré canales. ¿Estás unido al canal de señales?", "info" if items else "warn")
-        self.app.bg(self.app.tg.channels, ok, lambda e: self.set_status(self.st, f"✖ {e}", "bad"))
+    def mark(self, d: dict) -> str:
+        return "☑" if any(c.ref == channel_ref(d) for c in self.channels()) else "☐"
 
     def refill(self):
-        q = self.q.get().strip().lower()
-        self.tree.delete(*self.tree.get_children())
-        for i, it in enumerate(self.items):
-            if q in it["name"].lower() or q in it["username"].lower():
-                self.tree.insert("", "end", iid=str(i), values=(it["name"], it["kind"], ("@" + it["username"]) if it["username"] else ""))
+        label, q = self.folder_var.get(), self.q.get().strip().lower()
+        base = self.dialogs
+        folder = self.folder_by_label.get(label)
+        if folder is not None:
+            members = set(folder["members"])
+            base = [d for d in self.dialogs if d["id"] in members]
+        self.visible = [d for d in base if q in d["name"].lower() or q in d["username"].lower()]
+        self.avail.delete(*self.avail.get_children())
+        for i, d in enumerate(self.visible):
+            self.avail.insert("", "end", iid=str(i), values=(
+                self.mark(d), d["name"], d["kind"], ("@" + d["username"]) if d["username"] else ""))
 
-    def pick(self, _=None):
-        sel = self.tree.selection()
-        if not sel:
+    def refill_chosen(self, keep: Optional[int] = None):
+        self.chosen.delete(*self.chosen.get_children())
+        for c in self.channels():
+            self.chosen.insert("", "end", iid=str(c.num), values=self.chosen_values(c))
+        if keep is not None and self.chosen.exists(str(keep)):
+            self.chosen.selection_set(str(keep))
+
+    @staticmethod
+    def chosen_values(c: ChannelCfg):
+        return ("☑" if c.enabled else "☐", c.title or c.ref, f"{c.lot_size:g}" if c.lot_size else "General",
+                str(c.max_tps) if c.max_tps else "General")
+
+    def refresh_all(self):
+        keep = self.sel_num
+        self.refill()
+        self.refill_chosen(keep)
+        chans = self.channels()
+        active = [c for c in chans if c.enabled]
+        if not active:
+            self.set_status(self.st, "Marca al menos un canal de la lista para continuar.", "warn")
+        else:
+            names = ", ".join(c.title or c.ref for c in active)
+            extra = ""
+            if len(active) > 3:
+                extra = (f"\nCon tantos canales, recuerda que el máximo de posiciones abiertas "
+                         f"({self.app.settings.max_open_positions}) se comparte entre todos.")
+            self.set_status(self.st, f"✔ {len(active)} canal(es) activo(s): {names}{extra}", "ok")
+
+    # ---- clics
+    def on_click(self, tree, ev, action):
+        """Un clic en la columna ☐/☑ marca o desmarca."""
+        if tree.identify("region", ev.x, ev.y) != "cell" or tree.identify_column(ev.x) != "#1":
+            return None
+        iid = tree.identify_row(ev.y)
+        if iid:
+            action(iid)
+        return "break"
+
+    def on_double(self, tree, ev, action):
+        if tree.identify_column(ev.x) == "#1":
             return
-        it = self.items[int(sel[0])]
-        self.app.set_channel(("@" + it["username"]) if it["username"] else str(it["id"]), it["name"])
-        self.set_status(self.st, f"✔ Canal elegido: {it['name']}", "ok")
+        iid = tree.identify_row(ev.y)
+        if iid:
+            action(iid)
+
+    def toggle_iid(self, iid: str):
+        d = self.visible[int(iid)]
+        ref, chans = channel_ref(d), self.channels()
+        existing = next((c for c in chans if c.ref == ref), None)
+        if existing:
+            chans.remove(existing)
+            if self.sel_num == existing.num:
+                self.sel_num = None
+        else:
+            chans.append(ChannelCfg(next_num(chans), ref, d["name"]))
+        self.refresh_all()
+
+    def toggle_enabled(self, iid: str):
+        c = self.by_num(int(iid))
+        if c:
+            c.enabled = not c.enabled
+            self.refresh_all()
+
+    def by_num(self, num: Optional[int]) -> Optional[ChannelCfg]:
+        return next((c for c in self.channels() if c.num == num), None)
+
+    def add_visible(self):
+        chans = self.channels()
+        have = {c.ref for c in chans}
+        new = [d for d in self.visible if channel_ref(d) not in have]
+        if not new:
+            return self.set_status(self.st, "Todos los de esta vista ya están elegidos.", "info")
+        if len(new) > 5 and not messagebox.askyesno(
+                "Agregar muchos canales",
+                f"Vas a agregar {len(new)} canales. Cada uno puede abrir operaciones.\n¿Quieres agregarlos todos?"):
+            return
+        for d in new:
+            chans.append(ChannelCfg(next_num(chans), channel_ref(d), d["name"]))
+        self.refresh_all()
 
     def use_manual(self):
         ref = self.manual.get().strip()
         if not ref:
             return
-        self.app.set_channel(ref, ref)
-        self.set_status(self.st, f"✔ Canal elegido: {ref}", "ok")
+        if ref.lstrip("-").isdigit() is False and not ref.startswith("@"):
+            ref = "@" + ref
+        chans = self.channels()
+        if any(c.ref == ref for c in chans):
+            return self.set_status(self.st, f"{ref} ya estaba en la lista.", "info")
+        chans.append(ChannelCfg(next_num(chans), ref, ref))
+        self.manual.set("")
+        self.refresh_all()
+
+    # ---- ajustes por canal
+    def on_pick(self, _=None):
+        sel = self.chosen.selection()
+        self.sel_num = int(sel[0]) if sel else None
+        c = self.by_num(self.sel_num)
+        self._loading = True
+        self.ed_lot.set(f"{c.lot_size:g}" if c and c.lot_size else "")
+        self.ed_tps.set(str(c.max_tps) if c and c.max_tps else "General")
+        self._loading = False
+
+    def apply_edit(self):
+        c = self.by_num(self.sel_num)
+        if self._loading or c is None:
+            return
+        raw = self.ed_lot.get().strip().replace(",", ".")
+        try:
+            c.lot_size = float(raw) if raw else 0.0
+        except ValueError:
+            return                              # escribiendo (ej. «0.»): se valida al avanzar
+        tps = self.ed_tps.get()
+        c.max_tps = int(tps) if tps.isdigit() else 0
+        if self.chosen.exists(str(c.num)):
+            self.chosen.item(str(c.num), values=self.chosen_values(c))
+
+    def remove_selected(self):
+        c = self.by_num(self.sel_num)
+        if c is None:
+            return self.set_status(self.st, "Marca primero un canal en «Canales elegidos».", "warn")
+        self.channels().remove(c)
+        self.sel_num = None
+        self.on_pick()
+        self.refresh_all()
+
+    # ---- Telegram
+    def on_show(self):
+        self.refresh_all()
+        if self.app.tg_user and self.app.tg and not self.dialogs:
+            self.load()
+
+    def load(self):
+        if not self.app.tg:
+            return self.set_status(self.st, "Primero conecta Telegram en el paso anterior.", "warn")
+        self.load_btn.state(["disabled"])
+        self.set_status(self.st, "Cargando tus canales y carpetas…")
+
+        def ok(ov):
+            self.load_btn.state(["!disabled"])
+            self.dialogs, self.folders = ov["channels"], ov["folders"]
+            self.folder_by_label = {}
+            for f in self.folders:
+                label, n = f["title"], 2
+                while label in self.folder_by_label or label == self.ALL:
+                    label, n = f"{f['title']} ({n})", n + 1
+                self.folder_by_label[label] = f
+            self.folder_cb["values"] = [self.ALL] + list(self.folder_by_label)
+            self.folder_var.set(self.ALL)
+            self.refresh_all()
+            note = ""
+            if ov.get("folders_error"):
+                note = "\nNo pude leer tus carpetas de Telegram; se muestran todos tus canales."
+            elif self.folders:
+                note = f"\n{len(self.folders)} carpeta(s) disponibles en el desplegable «Carpeta»."
+            if not self.dialogs:
+                self.set_status(self.st, "No encontré canales. ¿Estás unido al canal de señales?", "warn")
+            elif note:
+                self.st.show(self.st.cget("text") + note, "ok" if "No pude" not in note else "warn")
+        self.app.bg(self.app.tg.overview, ok,
+                    lambda e: (self.load_btn.state(["!disabled"]), self.set_status(self.st, f"✖ {e}", "bad")))
 
     def check(self):
         return sl.validate_channel(self.app.settings)
 
     def done(self):
-        return bool(self.app.settings.channel)
+        return any(c.enabled for c in self.app.settings.channels)
 
 
 class MT5Step(Step):
@@ -405,7 +634,10 @@ class MT5Step(Step):
             r = ttk.Frame(box)
             r.pack(anchor="w", pady=2)
             ttk.Label(r, text=label, width=20).pack(side="left")
-            ttk.Entry(r, textvariable=self.app.v[name], show=show, width=30).pack(side="left")
+            e = ttk.Entry(r, textvariable=self.app.v[name], show=show, width=30)
+            e.pack(side="left")
+            if show:
+                self.reveal_button(r, e, show)
         r = ttk.Frame(self)
         r.pack(anchor="w", pady=4)
         ttk.Label(r, text="Símbolo del oro", width=22).pack(side="left")
@@ -701,6 +933,12 @@ class BacktestStep(Step):
                   "informe con ganancia, riesgo, mejor forma de operarlo y mejor horario. Necesita MetaTrader 5 abierto.")
         v = self.app.v
         r = ttk.Frame(self); r.pack(anchor="w", pady=3)
+        ttk.Label(r, text="Canal a analizar", width=24).pack(side="left")
+        self.chan = tk.StringVar()
+        self.chan_cb = ttk.Combobox(r, textvariable=self.chan, state="readonly", width=36)
+        self.chan_cb.pack(side="left")
+        self.chan_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_report_button())
+        r = ttk.Frame(self); r.pack(anchor="w", pady=3)
         ttk.Label(r, text="Historial a descargar", width=24).pack(side="left")
         self.days = tk.StringVar(value="90")
         ttk.Combobox(r, textvariable=self.days, values=["30", "60", "90", "180"], width=6).pack(side="left")
@@ -731,9 +969,25 @@ class BacktestStep(Step):
         self.log = scrolledtext.ScrolledText(self, height=11, width=80, wrap="none", state="disabled", font=("Consolas" if IS_WINDOWS else "TkFixedFont", 9))
         self.log.pack(fill="both", expand=True)
 
+    def channel_labels(self):
+        return {f"{c.title or c.ref}  (#{c.num})": c for c in self.app.settings.channels}
+
+    def selected_channel(self) -> Optional[ChannelCfg]:
+        return self.channel_labels().get(self.chan.get())
+
+    def report_path(self, c: Optional[ChannelCfg] = None) -> Path:
+        c = c or self.selected_channel()
+        return data_dir() / (f"report_c{c.num}.html" if c else "report.html")
+
+    def refresh_report_button(self):
+        self.open_btn.state(["!disabled" if self.report_path().exists() else "disabled"])
+
     def on_show(self):
-        if (data_dir() / "report.html").exists():
-            self.open_btn.state(["!disabled"])
+        labels = list(self.channel_labels())
+        self.chan_cb["values"] = labels
+        if self.chan.get() not in labels:
+            self.chan.set(labels[0] if labels else "")
+        self.refresh_report_button()
 
     def detect(self):
         s = self.app.sync_settings()
@@ -764,6 +1018,9 @@ class BacktestStep(Step):
         errs = sl.validate_all(s)
         if errs:
             return messagebox.showwarning("Faltan datos", "\n".join(errs))
+        ch = self.selected_channel()
+        if ch is None:
+            return messagebox.showwarning("Falta el canal", "Elige primero el canal que quieres analizar.")
         try:
             days, bal, off = int(self.days.get()), float(self.balance.get()), float(self.offset.get())
         except ValueError:
@@ -772,12 +1029,14 @@ class BacktestStep(Step):
         self.app.close_tg()          # libera la sesión de Telegram para el proceso hijo
         self.btn.state(["disabled"]); self.bar.start(12)
         self.set_status(self.st, "Descargando el historial y simulando… puede tardar unos minutos.")
-        out = str(data_dir() / "history.json")
-        steps = [["--backtest", "fetch", "--days", str(days), "--out", out],
+        out = str(data_dir() / f"history_c{ch.num}.json")
+        steps = [["--backtest", "fetch", "--channel", str(ch.num), "--days", str(days), "--out", out],
                  ["--backtest", "run", "--history", out, "--prices", "mt5", "--symbol", s.symbol,
-                  "--server-offset", str(off), "--lot", str(s.lot_size), "--max-tps", str(s.max_tps),
+                  "--server-offset", str(off), "--lot", str(ch.lot_size or s.lot_size),
+                  "--max-tps", str(ch.max_tps or s.max_tps),
                   "--balance", str(bal), "--report-tz", f"{s.tz_offset_hours:g}",
-                  "--report", str(data_dir() / "report.html"), "--out", str(data_dir() / "backtest_trades.csv")]
+                  "--report", str(self.report_path(ch)),
+                  "--out", str(data_dir() / f"backtest_trades_c{ch.num}.csv")]
                  + (["--us-dst"] if self.dst.get() else [])]
 
         def work():
@@ -799,12 +1058,12 @@ class BacktestStep(Step):
         self.app.bg(work, finished, lambda e: (self.bar.stop(), self.btn.state(["!disabled"]), self.set_status(self.st, f"✖ {e}", "bad")))
 
     def open_report(self):
-        p = data_dir() / "report.html"
+        p = self.report_path()
         if p.exists():
             webbrowser.open(p.as_uri())
 
     def done(self):
-        return (data_dir() / "report.html").exists()
+        return any(self.report_path(c).exists() for c in self.app.settings.channels)
 
 
 class StartupStep(Step):
@@ -873,15 +1132,27 @@ class PanelStep(Step):
         r = ttk.Frame(self); r.pack(anchor="w", pady=8)
         self.start_btn = ttk.Button(r, text="▶  Iniciar", style="Accent.TButton", command=self.start)
         self.start_btn.pack(side="left")
-        self.stop_btn = ttk.Button(r, text="■  Detener", command=self.stop)
+        self.stop_btn = ttk.Button(r, text="■  Detener", style="Danger.TButton", command=self.stop)
         self.stop_btn.pack(side="left", padx=8)
         ttk.Button(r, text="Abrir carpeta de datos", command=lambda: self.app.open_path(data_dir())).pack(side="left", padx=8)
-        ttk.Button(r, text="Abrir informe", command=lambda: self.app.open_path(data_dir() / "report.html")).pack(side="left")
         self.st = self.status()
         ttk.Label(self, text="Registro del programa", style="H2.TLabel").pack(anchor="w", pady=(6, 2))
         self.log = scrolledtext.ScrolledText(self, height=12, width=80, wrap="none", state="disabled", font=("Consolas" if IS_WINDOWS else "TkFixedFont", 9))
         self.log.pack(fill="both", expand=True)
-        self._job = None
+        self._jobs: set = set()
+
+    def later(self, ms: int, fn):
+        jid = self.after(ms, lambda: (self._jobs.discard(jid), fn()))
+        self._jobs.add(jid)
+        return jid
+
+    def cancel_jobs(self):
+        for jid in list(self._jobs):
+            try:
+                self.after_cancel(jid)
+            except tk.TclError:
+                pass
+        self._jobs.clear()
 
     def on_show(self):
         self.refresh()
@@ -893,7 +1164,11 @@ class PanelStep(Step):
         else:
             self.mode.config(text="MODO REAL — se enviarán órdenes a tu cuenta", foreground=BAD)
         sched = "sin restricción" if not s.filter_enabled else f"{days_label(s.trading_days)} · {s.trading_hours} (UTC{s.tz_offset_hours:+g})"
-        self.summary.config(text=(f"Canal: {s.channel_title or s.channel or '—'}   |   Símbolo: {s.symbol}\n"
+        chans = "; ".join(
+            f"{c.title or c.ref} (lote {c.lot_size or s.lot_size:g}"
+            f"{', ' + str(c.max_tps) + ' TP' if c.max_tps else ''}{'' if c.enabled else ', PAUSADO'})"
+            for c in s.channels) or "—"
+        self.summary.config(text=(f"Canales: {chans}\nSímbolo: {s.symbol}\n"
                                   f"Lote total: {s.lot_size}   |   TPs: {s.max_tps}   |   Horario: {sched}\n"
                                   f"Avisos por Telegram: {'sí' if s.alerts_enabled else 'no'}"))
         running = self.app.bot_running()
@@ -905,9 +1180,9 @@ class PanelStep(Step):
         elif self.st.cget("text").startswith("●") or not self.st.cget("text"):
             self.set_status(self.st, "○ Detenido. Pulsa «Iniciar» para empezar.", "info")
         self.tail()
-        if self._job:
-            self.after_cancel(self._job)
-        self._job = self.after(2000, self.refresh) if self.app.current is self else None
+        self.cancel_jobs()
+        if self.app.current is self:
+            self.later(2000, self.refresh)
 
     def tail(self):
         p = data_dir() / "autotrade.log"
@@ -941,7 +1216,7 @@ class PanelStep(Step):
         except OSError as e:
             return self.set_status(self.st, f"✖ No se pudo iniciar: {e}", "bad")
         self.set_status(self.st, "Iniciando… (en unos segundos recibirás un aviso en Telegram)", "info")
-        self.after(1500, self.refresh)
+        self.later(1500, self.refresh)
 
     def stop(self):
         pid = read_pid()
@@ -952,7 +1227,7 @@ class PanelStep(Step):
         except OSError:
             pass
         self.set_status(self.st, "○ Detenido.", "info")
-        self.after(800, self.refresh)
+        self.later(800, self.refresh)
 
     def done(self):
         return self.app.bot_running()
@@ -968,8 +1243,8 @@ class App(tk.Tk):
         super().__init__()
         self.sync = sync                    # modo síncrono (pruebas): sin hilos
         self.title("AutoTrade — Asistente de instalación")
-        self.geometry("1000x700")
-        self.minsize(940, 660)
+        self.geometry("1080x800")
+        self.minsize(1000, 740)
         self.settings = sl.load_settings(data_dir() / "config.ini")
         self.tg = None
         self.tg_user: Optional[str] = None
@@ -978,6 +1253,8 @@ class App(tk.Tk):
         self._style()
         self.v: Dict[str, tk.Variable] = {}
         for f in fields(Settings):
+            if f.name == "channels":            # lista: la edita el paso «Canales», no un campo de texto
+                continue
             val = getattr(self.settings, f.name)
             self.v[f.name] = (tk.BooleanVar(value=val) if isinstance(val, bool)
                               else tk.StringVar(value=f"{val:g}" if isinstance(val, float) else str(val)))
@@ -993,48 +1270,163 @@ class App(tk.Tk):
 
     # ---- estilo y estructura
     def _style(self):
+        from tkinter import font as tkfont
         st = ttk.Style(self)
         # "clam" en todas las plataformas: el tema nativo de Windows ignora los colores de fondo
-        # y dejaba los botones azules con texto blanco sobre fondo gris (ilegibles).
+        # (botones con texto blanco sobre gris = ilegibles). Aquí cada estado define fondo Y texto.
         st.theme_use("clam")
         fam = "Segoe UI" if IS_WINDOWS else None
-        from tkinter import font as tkfont
         base = tkfont.nametofont("TkDefaultFont")
         base.configure(size=10, **({"family": fam} if fam else {}))
-        self.font_big = tkfont.Font(family=fam or base.actual("family"), size=13, weight="bold")
-        st.configure("Title.TLabel", font=tkfont.Font(family=fam or base.actual("family"), size=16, weight="bold"))
-        st.configure("H2.TLabel", font=tkfont.Font(family=fam or base.actual("family"), size=11, weight="bold"))
+        family = fam or base.actual("family")
+        mk = lambda size, weight="normal": tkfont.Font(family=family, size=size, weight=weight)
+        self.font_big, self.font_bold, self.font_small = mk(14, "bold"), mk(10, "bold"), mk(8, "bold")
+        self.font_base = base
+
+        st.configure(".", background=BG, foreground=TEXT, bordercolor=BORDER, font=base,
+                     troughcolor=BAR, focuscolor=BG, lightcolor=BG, darkcolor=BG)
+        st.configure("Title.TLabel", font=mk(20, "bold"), foreground=TEXT)
+        st.configure("H2.TLabel", font=mk(11, "bold"))
         st.configure("Muted.TLabel", foreground=MUTED)
-        st.configure("Accent.TButton", foreground="white", background=ACCENT, padding=6)
-        st.map("Accent.TButton", background=[("active", "#1f48ad"), ("disabled", "#9db3ea")],
-               foreground=[("disabled", "#ffffff")])
-        st.configure("Side.TLabel", padding=(14, 7))
-        st.configure("SideCur.TLabel", padding=(14, 7), background="#e8eefc", foreground=ACCENT,
-                     font=tkfont.Font(family=fam or base.actual("family"), size=10, weight="bold"))
+        st.configure("Bar.TFrame", background=BAR)
+
+        def button(name, bg, fg, border, hover, press, dis_bg, dis_fg, pad=(16, 8), font=None, bevel=None):
+            bevel = bevel or bg                 # color del filo interior: igual al borde en los secundarios
+            st.configure(name, background=bg, foreground=fg, bordercolor=border, lightcolor=bevel, darkcolor=bevel,
+                         focuscolor=bg, padding=pad, relief="raised", borderwidth=1, font=font or self.font_bold)
+            st.map(name,
+                   background=[("disabled", dis_bg), ("pressed", press), ("active", hover)],
+                   foreground=[("disabled", dis_fg), ("!disabled", fg)],
+                   bordercolor=[("disabled", dis_bg), ("focus", ACCENT), ("active", hover)],
+                   lightcolor=[("disabled", dis_bg), ("pressed", press), ("active", hover)],
+                   darkcolor=[("disabled", dis_bg), ("pressed", press), ("active", hover)])
+        # Secundario (por defecto): fondo claro + texto oscuro
+        # (fondo gris claro + borde visible: se distingue como botón sobre el fondo blanco)
+        button("TButton", "#f4f6fb", TEXT, "#9aa6c0", "#e4e9f5", "#d6ddee", "#f4f6fa", "#6f788d",
+               font=self.font_base, bevel="#9aa6c0")
+        # Principal: azul + texto blanco
+        button("Accent.TButton", ACCENT, "#ffffff", ACCENT, ACCENT_DK, ACCENT_PR, "#dfe5f5", "#6b7fb5")
+        # Peligro: rojo + texto blanco
+        button("Danger.TButton", BAD, "#ffffff", BAD, "#a82a19", "#8f2214", "#f6dcd8", "#b0675d")
+        # Pequeño (Mostrar/Ocultar)
+        button("Small.TButton", "#f4f6fb", ACCENT_DK, "#9aa6c0", "#e4e9f5", "#d6ddee", "#f4f6fa", "#6f788d",
+               pad=(8, 4), font=self.font_base, bevel="#9aa6c0")
+
+        for w in ("TEntry", "TCombobox", "TSpinbox"):
+            st.configure(w, fieldbackground="#ffffff", background="#ffffff", foreground=TEXT,
+                         bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, insertcolor=TEXT,
+                         padding=(8, 6), arrowcolor=MUTED, arrowsize=14,
+                         selectbackground="#dbe6ff", selectforeground=TEXT)
+            st.map(w, bordercolor=[("focus", ACCENT), ("hover", "#aab4cc")],
+                   lightcolor=[("focus", ACCENT)], darkcolor=[("focus", ACCENT)],
+                   fieldbackground=[("disabled", "#f1f3f8"), ("readonly", "#ffffff")],
+                   foreground=[("disabled", "#98a1b3")],
+                   selectbackground=[("readonly", "#ffffff")], selectforeground=[("readonly", TEXT)])
+        self.option_add("*TCombobox*Listbox.background", "#ffffff")
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        self.option_add("*TCombobox*Listbox.font", base)
+
+        for w in ("TCheckbutton", "TRadiobutton"):
+            # indicador grande y con borde oscuro (el gris claro por defecto casi no se veía)
+            st.configure(w, background=BG, foreground=TEXT, indicatorbackground="#ffffff",
+                         indicatorforeground="#ffffff", upperbordercolor="#7d89a6", lowerbordercolor="#7d89a6",
+                         indicatorsize=18, indicatormargin=(2, 2, 8, 2), padding=(2, 4))
+            st.map(w, background=[("active", BG)], foreground=[("disabled", "#98a1b3")],
+                   indicatorbackground=[("selected", ACCENT), ("pressed", "#e1e7f3")],
+                   indicatorforeground=[("selected", "#ffffff")])
+        # círculo elegido = punto azul en el centro con borde azul
+        st.map("TRadiobutton", indicatorbackground=[("selected", "#ffffff"), ("pressed", "#e1e7f3")],
+               indicatorforeground=[("selected", ACCENT)],
+               upperbordercolor=[("selected", ACCENT)], lowerbordercolor=[("selected", ACCENT)])
+        st.configure("TLabelframe", background=BG, bordercolor=BORDER, relief="solid", borderwidth=1)
+        st.configure("TLabelframe.Label", background=BG, foreground=TEXT, font=self.font_bold)
+
+        st.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=TEXT,
+                     rowheight=28, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, borderwidth=1)
+        st.map("Treeview", background=[("selected", "#dbe6ff")], foreground=[("selected", TEXT)])
+        st.configure("Treeview.Heading", background=BAR, foreground=TEXT, font=self.font_bold, relief="flat",
+                     padding=(8, 6), bordercolor=BORDER, lightcolor=BAR, darkcolor=BAR)
+        st.map("Treeview.Heading", background=[("active", "#e8ecf5")])
+        st.configure("Vertical.TScrollbar", background="#c9d0de", troughcolor=BAR, bordercolor=BAR,
+                     arrowcolor=MUTED, lightcolor="#c9d0de", darkcolor="#c9d0de")
+        st.map("Vertical.TScrollbar", background=[("active", "#aab4cc")])
+        st.configure("Horizontal.TProgressbar", troughcolor="#e6eaf2", background=ACCENT, bordercolor="#e6eaf2",
+                     lightcolor=ACCENT, darkcolor=ACCENT)
+        st.configure("TSeparator", background=BORDER)
+
+        # Cuadros de texto (tk): borde fino, relleno interior y selección legible
+        for opt, val in (("background", "#ffffff"), ("foreground", TEXT), ("relief", "flat"),
+                         ("highlightThickness", 1), ("highlightBackground", BORDER), ("highlightColor", ACCENT),
+                         ("padX", 10), ("padY", 8), ("selectBackground", "#dbe6ff"), ("selectForeground", TEXT),
+                         ("insertBackground", TEXT)):
+            self.option_add(f"*Text.{opt}", val)
+        self.configure(bg=BG)
 
     def _build(self):
-        self.side = ttk.Frame(self, width=220)
+        # --- barra lateral oscura con los pasos
+        self.side = tk.Frame(self, bg=SIDEBAR, width=236)
         self.side.pack(side="left", fill="y")
         self.side.pack_propagate(False)
-        ttk.Label(self.side, text="AutoTrade", font=self.font_big, padding=(14, 14, 14, 10)).pack(anchor="w")
-        self.side_labels: List[ttk.Label] = []
+        tk.Label(self.side, text="AutoTrade", bg=SIDEBAR, fg="#ffffff", font=self.font_big, anchor="w").pack(
+            fill="x", padx=20, pady=(22, 0))
+        tk.Label(self.side, text="Señales de Telegram → MT5", bg=SIDEBAR, fg="#8d99b3", font=self.font_base,
+                 anchor="w").pack(fill="x", padx=20, pady=(2, 18))
+        self.side_rows, self.side_chips, self.side_labels, self.side_bars = [], [], [], []
         for i, cls in enumerate(STEPS):
-            l = ttk.Label(self.side, text="", style="Side.TLabel", cursor="hand2")
-            l.pack(fill="x")
-            l.bind("<Button-1>", lambda e, i=i: self.goto(i))
-            self.side_labels.append(l)
-        ttk.Separator(self, orient="vertical").pack(side="left", fill="y")
-        right = ttk.Frame(self, padding=(24, 18))
+            row = tk.Frame(self.side, bg=SIDEBAR, cursor="hand2")
+            row.pack(fill="x")
+            bar = tk.Frame(row, width=4, bg=SIDEBAR)
+            bar.pack(side="left", fill="y")
+            chip = tk.Label(row, text=str(i + 1), width=3, bg="#38435c", fg="#ffffff", font=self.font_small)
+            chip.pack(side="left", padx=(14, 12), pady=9)
+            lab = tk.Label(row, text="", anchor="w", bg=SIDEBAR, fg="#aab4cc", font=self.font_base)
+            lab.pack(side="left", fill="x", expand=True)
+            for w in (row, bar, chip, lab):
+                w.bind("<Button-1>", lambda e, i=i: self.goto(i))
+                w.bind("<Enter>", lambda e, i=i: self._hover(i, True))
+                w.bind("<Leave>", lambda e, i=i: self._hover(i, False))
+            self.side_rows.append(row)
+            self.side_bars.append(bar)
+            self.side_chips.append(chip)
+            self.side_labels.append(lab)
+
+        # --- zona principal: encabezado con progreso, contenido y barra de navegación
+        right = tk.Frame(self, bg=BG)
         right.pack(side="left", fill="both", expand=True)
-        self.body = ttk.Frame(right)
+        head = tk.Frame(right, bg=BG)
+        head.pack(fill="x", padx=34, pady=(20, 0))
+        self.crumb = tk.Label(head, text="", bg=BG, fg=MUTED, font=self.font_small, anchor="w")
+        self.crumb.pack(fill="x")
+        self.progress = tk.Canvas(head, height=4, bg="#e6eaf2", highlightthickness=0)
+        self.progress.pack(fill="x", pady=(6, 0))
+        self.progress.bind("<Configure>", lambda e: self._draw_progress())
+        self.body = ttk.Frame(right, padding=(34, 16, 34, 6))
         self.body.pack(fill="both", expand=True)
         self.steps = [cls(self, self.body) for cls in STEPS]
-        nav = ttk.Frame(right)
-        nav.pack(fill="x", pady=(10, 0))
-        self.back_btn = ttk.Button(nav, text="← Atrás", command=lambda: self.goto(self.index - 1))
+        ttk.Separator(right, orient="horizontal").pack(fill="x")
+        nav = ttk.Frame(right, style="Bar.TFrame", padding=(34, 12))
+        nav.pack(fill="x")
+        self.back_btn = ttk.Button(nav, text="←  Atrás", command=lambda: self.goto(self.index - 1))
         self.back_btn.pack(side="left")
-        self.next_btn = ttk.Button(nav, text="Siguiente →", style="Accent.TButton", command=lambda: self.goto(self.index + 1))
+        self.next_btn = ttk.Button(nav, text="Siguiente  →", style="Accent.TButton",
+                                   command=lambda: self.goto(self.index + 1))
         self.next_btn.pack(side="right")
+
+    def _draw_progress(self):
+        c = self.progress
+        c.delete("all")
+        w = c.winfo_width()
+        if self.index >= 0 and w > 1:
+            c.create_rectangle(0, 0, w * (self.index + 1) / len(STEPS), 4, fill=ACCENT, width=0)
+
+    def _hover(self, i: int, on: bool):
+        if i == self.index:
+            return
+        bg = SIDE_HOVER if on else SIDEBAR
+        for w in (self.side_rows[i], self.side_bars[i], self.side_labels[i]):
+            w.config(bg=bg)
 
     def _configured(self) -> bool:
         p = data_dir() / "config.ini"
@@ -1063,20 +1455,32 @@ class App(tk.Tk):
         self.current.pack(fill="both", expand=True)
         self.current.on_show()
         self.title(f"AutoTrade — {self.current.title}")
+        self.crumb.config(text=f"PASO {i + 1} DE {len(STEPS)}")
+        self._draw_progress()
         self.back_btn.state(["disabled" if i == 0 else "!disabled"])
         self.next_btn.pack_forget() if i == len(self.steps) - 1 else self.next_btn.pack(side="right")
         self.refresh_side()
 
     def refresh_side(self):
-        for i, l in enumerate(self.side_labels):
-            mark = "✔" if i in self.visited and i != self.index and self.steps[i].done() else f"{i + 1}"
-            l.config(text=f"  {mark}   {self.steps[i].short}", style="SideCur.TLabel" if i == self.index else "Side.TLabel")
+        for i in range(len(STEPS)):
+            cur = i == self.index
+            done = i in self.visited and not cur and self.steps[i].done()
+            row_bg = SIDE_ACTIVE if cur else SIDEBAR
+            chip_bg = ACCENT if cur else ("#1f9d63" if done else "#38435c")
+            self.side_chips[i].config(text="✔" if done else str(i + 1), bg=chip_bg)
+            self.side_labels[i].config(text=self.steps[i].short, bg=row_bg,
+                                       fg="#ffffff" if cur else ("#dfe5f3" if done else "#aab4cc"),
+                                       font=self.font_bold if cur else self.font_base)
+            self.side_rows[i].config(bg=row_bg)
+            self.side_bars[i].config(bg="#7aa2ff" if cur else row_bg)
 
     # ---- ajustes
     def sync_settings(self) -> Settings:
         """Vuelca los campos de pantalla a Settings (conversión de tipos tolerante)."""
         s = self.settings
         for f in fields(Settings):
+            if f.name == "channels":
+                continue
             raw = self.v[f.name].get()
             cur = getattr(s, f.name)
             try:
@@ -1092,11 +1496,6 @@ class App(tk.Tk):
                 continue                    # se conserva el valor anterior; los validadores avisan
             setattr(s, f.name, val)
         return s
-
-    def set_channel(self, ref: str, title: str):
-        self.v["channel"].set(ref)
-        self.v["channel_title"].set(title)
-        self.settings.channel, self.settings.channel_title = ref, title
 
     def save(self):
         (data_dir() / "config.ini").write_text(sl.render_config(self.settings), encoding="utf-8")
@@ -1152,12 +1551,14 @@ class App(tk.Tk):
 
     def destroy(self):
         # cancelar tareas programadas para que no queden callbacks huérfanos
-        for job in (getattr(self, "_pump_job", None), getattr(self.steps[-1], "_job", None) if hasattr(self, "steps") else None):
-            if job:
-                try:
-                    self.after_cancel(job)
-                except tk.TclError:
-                    pass
+        job = getattr(self, "_pump_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        for step in getattr(self, "steps", []):
+            getattr(step, "cancel_jobs", lambda: None)()
         super().destroy()
 
     # ---- bot

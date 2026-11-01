@@ -11,11 +11,12 @@ import configparser
 import glob
 import os
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import List, Optional
 
 from .backtest import is_us_dst
+from .channels import ChannelCfg, parse_channels, render_channels
 from .schedule import TradingSchedule
 
 
@@ -25,9 +26,8 @@ class Settings:
     api_id: str = ""
     api_hash: str = ""
     phone: str = ""
-    channel: str = ""
-    channel_title: str = ""
     session_name: str = "autotrade"
+    channels: List[ChannelCfg] = field(default_factory=list)
     # MT5
     mt5_path: str = ""
     mt5_login: str = ""
@@ -68,10 +68,9 @@ def render_config(s: Settings) -> str:
 api_id = {s.api_id}
 api_hash = {s.api_hash}
 phone = {s.phone}
-channel = {s.channel}
-channel_title = {s.channel_title}
 session_name = {s.session_name}
 
+{render_channels(s.channels)}
 [mt5]
 login = {s.mt5_login}
 password = {s.mt5_password}
@@ -142,8 +141,7 @@ def load_settings(path: os.PathLike) -> Settings:
 
     mapping = {
         "api_id": ("telegram", "api_id"), "api_hash": ("telegram", "api_hash"),
-        "phone": ("telegram", "phone"), "channel": ("telegram", "channel"),
-        "channel_title": ("telegram", "channel_title"), "session_name": ("telegram", "session_name"),
+        "phone": ("telegram", "phone"), "session_name": ("telegram", "session_name"),
         "mt5_path": ("mt5", "path"), "mt5_login": ("mt5", "login"), "mt5_password": ("mt5", "password"),
         "mt5_server": ("mt5", "server"), "symbol": ("mt5", "symbol"), "magic": ("mt5", "magic"),
         "deviation": ("mt5", "deviation"), "dry_run": ("trading", "dry_run"),
@@ -159,6 +157,7 @@ def load_settings(path: os.PathLike) -> Settings:
         if f.name in mapping:
             sec, key = mapping[f.name]
             setattr(s, f.name, g(sec, key, getattr(s, f.name)))
+    s.channels = parse_channels(cp)
     s.filter_enabled = bool(g("filters", "trading_days", "") or g("filters", "trading_hours", ""))
     if not s.trading_days:
         s.trading_days = "Mon-Fri"
@@ -180,7 +179,17 @@ def validate_telegram(s: Settings) -> List[str]:
 
 
 def validate_channel(s: Settings) -> List[str]:
-    return [] if s.channel.strip() else ["Elige el canal de señales (o escribe su @usuario)."]
+    errs = []
+    active = [c for c in s.channels if c.enabled and c.ref.strip()]
+    if not active:
+        errs.append("Elige al menos un canal de señales (o escribe su @usuario) y déjalo activo.")
+    for c in s.channels:
+        name = c.title or c.ref
+        if c.lot_size and not (0.01 <= c.lot_size <= 100):
+            errs.append(f"Canal «{name}»: el lote debe estar entre 0.01 y 100 (o vacío para usar el general).")
+        if c.max_tps not in (0, 1, 2, 3):
+            errs.append(f"Canal «{name}»: los TPs deben ser 1, 2 o 3 (o el general).")
+    return errs
 
 
 def validate_mt5(s: Settings) -> List[str]:

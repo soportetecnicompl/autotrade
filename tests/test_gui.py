@@ -23,11 +23,12 @@ if HAVE_TK:
     from tkinter import messagebox
     import main as bot_main
     from autotrade import gui, mt5_helper, paths, setup_logic as sl
+    from autotrade.channels import ChannelCfg
 
 
 class FakeTG:
     def __init__(self, needs_password=False):
-        self.needs_password, self.calls = needs_password, []
+        self.needs_password, self.calls, self.folders_error = needs_password, [], ""
 
     def connect(self): return False
     def request_code(self, phone): self.calls.append(("code", phone))
@@ -36,9 +37,13 @@ class FakeTG:
         return "password" if self.needs_password else "ok"
     def sign_in_password(self, pw): self.calls.append(("pw", pw))
     def me_name(self): return "María Pérez"
-    def channels(self):
-        return [{"id": -1001, "name": "IC GOLD VIP", "username": "", "kind": "canal"},
-                {"id": -1002, "name": "Gold Pro", "username": "goldpro", "kind": "canal"}]
+    def overview(self):
+        ds = [{"id": -1001, "name": "IC GOLD VIP", "username": "", "kind": "canal", "muted": False, "archived": False, "unread": 1},
+              {"id": -1002, "name": "Gold Pro", "username": "goldpro", "kind": "canal", "muted": False, "archived": False, "unread": 0},
+              {"id": -1003, "name": "Familia", "username": "", "kind": "grupo", "muted": False, "archived": False, "unread": 0}]
+        return {"channels": ds, "folders": [{"id": 2, "title": "Señales", "members": [-1001, -1002]},
+                                            {"id": 3, "title": "Personal", "members": [-1003]}],
+                "folders_error": self.folders_error}
     def send_to_me(self, text): self.calls.append(("me", text))
     def close(self): self.calls.append(("close",))
 
@@ -111,8 +116,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(a.index, 2)
         c = a.steps[2]
         c.load()
-        c.tree.selection_set("1")
-        c.pick()
+        c.toggle_iid("1")                          # «Gold Pro» (@goldpro)
         a.goto(3)
         a.steps[3].probe()
         self.assertIn("5012345", a.steps[3].st.cget("text"))
@@ -123,8 +127,8 @@ class GuiTests(unittest.TestCase):
             a.steps[5].days[i].set(True)
         a.goto(6)
         cfg = bot_main.load_config(str(Path(self.tmp.name) / "config.ini"))
-        self.assertEqual((cfg["channel"], cfg["lot_size"], cfg["max_tps"], cfg["dry_run"]),
-                         ("@goldpro", 0.04, 3, False))
+        self.assertEqual([(c["ref"], c["title"]) for c in cfg["channels"]], [("@goldpro", "Gold Pro")])
+        self.assertEqual((cfg["lot_size"], cfg["max_tps"], cfg["dry_run"]), (0.04, 3, False))
         self.assertFalse(cfg["schedule"].always)
         self.assertEqual(cfg["api_id"], 12345678)
         self.assertEqual(sl.load_settings(Path(self.tmp.name) / "config.ini").trading_days,
@@ -174,9 +178,9 @@ class GuiTests(unittest.TestCase):
     def test_sidebar_checks_only_visited_steps(self):
         a = self.app
         a.show(0)
-        self.assertNotIn("✔", a.side_labels[4].cget("text"))      # «Operativa» aún no visitado
+        self.assertNotIn("✔", a.side_chips[4].cget("text"))       # «Operativa» aún no visitado
         a.show(4); a.show(0)
-        self.assertIn("✔", a.side_labels[4].cget("text"))
+        self.assertIn("✔", a.side_chips[4].cget("text"))
 
     # ---- probar mensaje
     def test_message_analyzer(self):
@@ -227,6 +231,118 @@ class GuiTests(unittest.TestCase):
         self.assertIn("multiarray failed to import", text)
         self.assertIn("✖", text)
 
+    # ---- varios canales y carpetas
+    def load_channels(self):
+        a = self.app
+        a.v["api_id"].set("12345678"); a.v["api_hash"].set("a" * 32); a.v["phone"].set("+50499998888")
+        a.tg_user = "María"; a.tg = self.tg
+        a.show(2)
+        return a.steps[2]
+
+    def test_folders_filter_the_channel_list(self):
+        c = self.load_channels()
+        self.assertEqual(len(c.visible), 3)                              # «Todos»
+        self.assertEqual(list(c.folder_cb["values"]), [c.ALL, "Señales", "Personal"])
+        c.folder_var.set("Señales"); c.refill()
+        self.assertEqual([d["name"] for d in c.visible], ["IC GOLD VIP", "Gold Pro"])
+        c.folder_var.set("Personal"); c.refill()
+        self.assertEqual([d["name"] for d in c.visible], ["Familia"])
+        c.folder_var.set(c.ALL); c.q.set("gold"); c.refill()
+        self.assertEqual(len(c.visible), 2)                              # búsqueda dentro de la vista
+
+    def test_pick_several_channels_and_set_per_channel_options(self):
+        a, c = self.app, self.load_channels()
+        c.folder_var.set("Señales"); c.refill()
+        c.add_visible()                                                  # agrega los 2 de la carpeta
+        self.assertEqual([x.ref for x in a.settings.channels], ["-1001", "@goldpro"])
+        self.assertEqual([x.num for x in a.settings.channels], [1, 2])
+        c.chosen.selection_set("2"); c.on_pick()
+        c.ed_lot.set("0.05"); c.ed_tps.set("3"); c.apply_edit()
+        ch = a.settings.channels[1]
+        self.assertEqual((ch.lot_size, ch.max_tps), (0.05, 3))
+        self.assertEqual(c.chosen.item("2", "values")[2:], ("0.05", "3"))
+        c.ed_lot.set(""); c.ed_tps.set("General"); c.apply_edit()
+        self.assertEqual((ch.lot_size, ch.max_tps), (0.0, 0))            # vacío/General = usar los generales
+        c.toggle_enabled("2")
+        self.assertFalse(ch.enabled)
+        c.remove_selected()
+        self.assertEqual([x.num for x in a.settings.channels], [1])
+
+    def test_toggle_in_list_adds_and_removes_and_numbers_stay_stable(self):
+        a, c = self.app, self.load_channels()
+        c.toggle_iid("0"); c.toggle_iid("1")                              # -1001 (#1) y @goldpro (#2)
+        c.toggle_iid("0")                                                 # quita #1
+        c.toggle_iid("2")                                                 # «Familia» -> nuevo número 3, no reutiliza 1
+        self.assertEqual([(x.num, x.ref) for x in a.settings.channels], [(2, "@goldpro"), (3, "-1003")])
+        self.assertEqual(c.avail.item("0", "values")[0], "☐")
+        self.assertEqual(c.avail.item("1", "values")[0], "☑")
+
+    def test_manual_channel_and_duplicates(self):
+        a, c = self.app, self.load_channels()
+        c.manual.set("micanal"); c.use_manual()
+        c.manual.set("@micanal"); c.use_manual()                          # duplicado: se ignora
+        c.manual.set("-1007"); c.use_manual()
+        self.assertEqual([x.ref for x in a.settings.channels], ["@micanal", "-1007"])
+
+    def test_cannot_advance_without_an_active_channel(self):
+        a, c = self.app, self.load_channels()
+        a.tg_user = "María"
+        a.goto(3)
+        self.assertEqual(a.index, 2)
+        c.toggle_iid("0"); c.toggle_enabled("1")                           # elegido pero pausado
+        a.goto(3)
+        self.assertEqual(a.index, 2)
+        c.toggle_enabled("1")
+        a.goto(3)
+        self.assertEqual(a.index, 3)
+
+    def test_folder_errors_do_not_block_choosing_channels(self):
+        self.tg.folders_error = "RPCError: FILTERS_NOT_AVAILABLE"
+        a = self.app
+        c = self.load_channels()
+        self.assertEqual(len(c.visible), 3)
+        self.assertIn("carpetas", c.st.cget("text"))
+
+    def test_panel_summary_lists_each_channel(self):
+        a = self.app
+        a.settings.channels = [ChannelCfg(1, "@a", "Canal A"), ChannelCfg(2, "@b", "Canal B", enabled=False, lot_size=0.05, max_tps=1)]
+        a.show(10)
+        text = a.steps[10].summary.cget("text")
+        self.assertIn("Canal A (lote 0.02)", text)
+        self.assertIn("Canal B (lote 0.05, 1 TP, PAUSADO)", text)
+
+    def test_backtest_step_is_per_channel(self):
+        a = self.app
+        a.settings.channels = [ChannelCfg(4, "@a", "Canal A"), ChannelCfg(9, "@b", "Canal B")]
+        a.show(8)
+        b = a.steps[8]
+        self.assertEqual(list(b.chan_cb["values"]), ["Canal A  (#4)", "Canal B  (#9)"])
+        self.assertEqual(b.selected_channel().num, 4)
+        self.assertTrue(str(b.report_path()).endswith("report_c4.html"))
+        b.chan.set("Canal B  (#9)")
+        self.assertTrue(str(b.report_path()).endswith("report_c9.html"))
+
+    def test_buttons_define_readable_colors_for_every_state(self):
+        """Regresión: texto de botones invisible. Cada estilo debe fijar texto Y fondo contrastados."""
+        from tkinter import ttk
+        st = ttk.Style(self.app)
+        def lum(c):
+            r, g, b = (int(c[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            f = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+            return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+        def ratio(a, b):
+            la, lb = sorted((lum(a), lum(b)), reverse=True)
+            return (la + 0.05) / (lb + 0.05)
+        for name in ("TButton", "Accent.TButton", "Danger.TButton", "Small.TButton"):
+            bg, fg = st.lookup(name, "background"), st.lookup(name, "foreground")
+            self.assertGreaterEqual(ratio(bg, fg), 4.5, f"{name}: texto poco legible en reposo")
+            for state in (["active"], ["pressed"]):
+                bg2 = st.lookup(name, "background", state)
+                fg2 = st.lookup(name, "foreground", state)
+                self.assertGreaterEqual(ratio(bg2, fg2), 4.5, f"{name} {state}")
+            bg3, fg3 = st.lookup(name, "background", ["disabled"]), st.lookup(name, "foreground", ["disabled"])
+            self.assertGreaterEqual(ratio(bg3, fg3), 2.5, f"{name}: deshabilitado ilegible")
+
     def test_welcome_label_texts_are_spanish_days(self):
         self.assertEqual(gui.days_label("Mon-Fri"), "Lun, Mar, Mié, Jue, Vie")
         self.assertEqual(gui.days_to_text({0, 2}), "Mon,Wed")
@@ -235,7 +351,7 @@ class GuiTests(unittest.TestCase):
     def configured(self):
         a = self.app
         a.v["api_id"].set("12345678"); a.v["api_hash"].set("a" * 32); a.v["phone"].set("+50499998888")
-        a.set_channel("@goldpro", "Gold Pro")
+        a.settings.channels = [ChannelCfg(1, "@goldpro", "Gold Pro")]
         a.sync_settings()
 
     def test_start_requires_valid_config(self):

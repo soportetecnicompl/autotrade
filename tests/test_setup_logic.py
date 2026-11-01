@@ -8,12 +8,13 @@ from pathlib import Path
 
 import main as bot_main
 from autotrade import paths, setup_logic as sl
+from autotrade.channels import ChannelCfg
 from autotrade.supervisor import supervise, read_pid
 
 
 def good() -> sl.Settings:
     return sl.Settings(api_id="12345678", api_hash="a" * 32, phone="+50499998888",
-                       channel="-1001234567890", channel_title="Mi canal VIP")
+                       channels=[ChannelCfg(1, "-1001234567890", "Mi canal VIP")])
 
 
 class ConfigTests(unittest.TestCase):
@@ -51,6 +52,35 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(back.filter_enabled)
         self.assertEqual((back.trading_days, back.trading_hours), ("Mon-Fri", "08:00-17:00"))
 
+    def test_multiple_channels_roundtrip_and_reach_the_bot(self):
+        s = good()
+        s.channels = [ChannelCfg(1, "-1001", "IC GOLD VIP"),
+                      ChannelCfg(3, "@goldpro", "Gold Pro", enabled=False, lot_size=0.05, max_tps=3),
+                      ChannelCfg(7, "-1009", "Otro", lot_size=0.01, max_tps=1)]
+        back, cfg = self.roundtrip(s)
+        self.assertEqual(back.channels, s.channels)                       # incluye números estables 1, 3, 7
+        self.assertEqual([(c["num"], c["ref"], c["enabled"], c["lot_size"], c["max_tps"])
+                          for c in cfg["channels"]],
+                         [(1, "-1001", True, 0.0, 0), (3, "@goldpro", False, 0.05, 3), (7, "-1009", True, 0.01, 1)])
+
+    def test_old_single_channel_config_still_loads(self):
+        old = ("[telegram]\napi_id = 1\napi_hash = a\nchannel = @viejo\nchannel_title = Canal viejo\n"
+               "[mt5]\n[trading]\n")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.ini"
+            p.write_text(old, encoding="utf-8")
+            self.assertEqual(sl.load_settings(p).channels, [ChannelCfg(1, "@viejo", "Canal viejo")])
+            self.assertEqual(bot_main.load_config(str(p))["channels"][0]["ref"], "@viejo")
+
+    def test_channel_validation(self):
+        s = good()
+        s.channels = [ChannelCfg(1, "-1", "A", enabled=False)]
+        self.assertTrue(sl.validate_channel(s))                           # ninguno activo
+        s.channels = [ChannelCfg(1, "-1", "A", lot_size=500.0, max_tps=5)]
+        self.assertEqual(len(sl.validate_channel(s)), 2)
+        s.channels = [ChannelCfg(1, "-1", "A", lot_size=0.03, max_tps=2), ChannelCfg(2, "-2", "B")]
+        self.assertEqual(sl.validate_channel(s), [])
+
     def test_missing_file_gives_defaults(self):
         self.assertEqual(sl.load_settings("/nonexistent/config.ini"), sl.Settings())
 
@@ -62,7 +92,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(len(sl.validate_telegram(bad)), 3)
 
     def test_channel_mt5_trading_alerts(self):
-        self.assertTrue(sl.validate_channel(sl.Settings()))
+        self.assertTrue(sl.validate_channel(sl.Settings()))               # sin canales
         self.assertEqual(sl.validate_channel(good()), [])
         s = good(); s.mt5_login = "12ab"
         self.assertTrue(any("dígitos" in e for e in sl.validate_mt5(s)))

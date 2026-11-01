@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from autotrade.parser import parse
 from autotrade.planner import Skip, plan_orders
+from autotrade.channels import parse_channels
 from autotrade.schedule import TradingSchedule
 
 log = logging.getLogger("main")
@@ -47,7 +48,8 @@ def load_config(path: str) -> dict:
         "heartbeat_minutes": float(al.get("heartbeat_minutes", 5) or 5),
         "mt5_check_seconds": float(al.get("mt5_check_seconds", 30) or 30),
         "api_id": t.getint("api_id"), "api_hash": t["api_hash"],
-        "phone": t.get("phone", ""), "channel": t["channel"],
+        "phone": t.get("phone", ""),
+        "channels": [c.to_dict() for c in parse_channels(cp)],
         "session_name": t.get("session_name", "autotrade"),
         "path": m.get("path", ""), "login": m.get("login", ""),
         "password": m.get("password", ""), "server": m.get("server", ""),
@@ -116,18 +118,36 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
     try:
         trader.connect()
 
-        ref = cfg["channel"].strip()
-        entity = await client.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref)
-        title = getattr(entity, "title", ref)
+        from telethon import utils as tg_utils
+
+        by_peer = {}                      # id de Telegram -> configuración del canal
+        for ch in (c for c in cfg["channels"] if c["enabled"]):
+            ref = ch["ref"].strip()
+            try:
+                ent = await client.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref)
+            except Exception as e:  # noqa: BLE001 - un canal inaccesible no debe tumbar a los demás
+                log.error("No se pudo acceder al canal %s: %s", ref, e)
+                notifier.notify(f"❌ No se pudo acceder al canal «{ch['title'] or ref}»: {e}. "
+                                "¿Sigues unido a él?", "error")
+                continue
+            ch = {**ch, "title": ch["title"] or getattr(ent, "title", ref)}
+            by_peer[tg_utils.get_peer_id(ent)] = ch
+        if not by_peer:
+            raise SystemExit("No hay ningún canal activo y accesible. Abre el asistente y elige al menos uno.")
+        titles = ", ".join(c["title"] for c in by_peer.values())
         sched = cfg["schedule"]
-        log.info("Escuchando '%s'. %s", title, mode)
+        log.info("Escuchando %d canal(es): %s. %s", len(by_peer), titles, mode)
         log.info("Filtro de horario: %s", "sin restricción" if sched.always else sched.describe())
 
-        @client.on(events.NewMessage(chats=entity))
+        @client.on(events.NewMessage(chats=list(by_peer)))
         async def on_message(event):
+            ch = by_peer.get(event.chat_id)
+            if ch is None:
+                return
+            who = f"[{ch['title']}] "
             text = event.raw_text or ""
             msg_id = event.message.id
-            log.info("Mensaje %s: %r", msg_id, text[:200])
+            log.info("%sMensaje %s: %r", who, msg_id, text[:200])
             res = parse(text)
             if not res:
                 return
@@ -135,22 +155,23 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
                 if res.signal:
                     age = (datetime.now(timezone.utc) - event.message.date).total_seconds()
                     if age > cfg["max_signal_age_sec"]:
-                        log.warning("Señal %s ignorada: tiene %.0fs de antigüedad", msg_id, age)
-                        notifier.notify(f"⚠️ Señal {msg_id} ignorada: llegó con {age:.0f}s de retraso", "warn")
+                        log.warning("%sSeñal %s ignorada: tiene %.0fs de antigüedad", who, msg_id, age)
+                        notifier.notify(f"⚠️ {who}Señal {msg_id} ignorada: llegó con {age:.0f}s de retraso", "warn")
                         return
                     if not sched.allows(event.message.date.timestamp()):
-                        log.info("Señal %s ignorada: fuera de horario (%s)", msg_id, sched.describe())
-                        notifier.notify(f"⚠️ Señal {msg_id} ignorada: fuera de horario", "warn")
+                        log.info("%sSeñal %s ignorada: fuera de horario (%s)", who, msg_id, sched.describe())
+                        notifier.notify(f"⚠️ {who}Señal {msg_id} ignorada: fuera de horario", "warn")
                         return
-                    trader.open_signal(res.signal, msg_id)
+                    trader.open_signal(res.signal, msg_id, ch)
                 elif cfg["enable_commands"]:
-                    # Si el comando responde a una señal, solo afecta a esa señal.
+                    # Si el comando responde a una señal, solo afecta a esa señal; si no, solo a las
+                    # operaciones de ESTE canal (nunca a las de otros canales).
                     scope = event.message.reply_to_msg_id
                     for c in res.commands:
-                        trader.handle_command(c, scope)
+                        trader.handle_command(c, scope, ch)
             except Exception as e:
-                log.exception("Error procesando mensaje %s", msg_id)
-                notifier.notify(f"💥 Error procesando el mensaje {msg_id}: {type(e).__name__}: {e}", "error")
+                log.exception("%sError procesando mensaje %s", who, msg_id)
+                notifier.notify(f"💥 {who}Error procesando el mensaje {msg_id}: {type(e).__name__}: {e}", "error")
 
         async def mt5_watchdog():
             ok_prev = True
@@ -193,7 +214,7 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
         notifier.notify(
             ("🔁 Bot REINICIADO automáticamente (reinicio #%d: se había detenido o el equipo se reinició)\n" % restarts
              if restarts else "🟢 Bot iniciado\n")
-            + f"Modo: {mode}\nCanal: {title}\nMT5: {trader.account_desc}\n"
+            + f"Modo: {mode}\nCanales ({len(by_peer)}): {titles}\nMT5: {trader.account_desc}\n"
             f"Símbolo: {cfg['symbol']} | lote total {cfg['lot_size']} | máx. TPs {cfg['max_tps']}\n"
             f"Horario: {'sin restricción' if sched.always else sched.describe()}", "error")
 

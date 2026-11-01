@@ -96,24 +96,28 @@ class Trader:
             self.mt5.shutdown()
 
     # --------------------------------------------------------------- utilidades
-    def _tag(self, msg_id: int) -> str:
-        return f"tg{msg_id}"
+    def _tag(self, ch_num: int, msg_id: int) -> str:
+        """Etiqueta de una señal: tg<canal>.<mensaje> (los ids de mensaje se repiten entre canales)."""
+        return f"tg{ch_num}.{msg_id}"
 
-    def _mine(self, items, msg_id: Optional[int]):
+    def _mine(self, items, ch_num: Optional[int] = None, msg_id: Optional[int] = None):
+        """Operaciones del bot. ch_num: solo las de ese canal; msg_id: solo las de esa señal."""
         out = []
         for it in items or []:
             if it.magic != self.magic:
                 continue
-            if msg_id is not None and it.comment.split(":")[0] != self._tag(msg_id):
+            if ch_num is not None and not it.comment.startswith(f"tg{ch_num}."):
+                continue
+            if msg_id is not None and it.comment.split(":")[0] != self._tag(ch_num or 1, msg_id):
                 continue
             out.append(it)
         return out
 
-    def positions(self, msg_id: Optional[int] = None):
-        return self._mine(self.mt5.positions_get(symbol=self.symbol), msg_id)
+    def positions(self, ch_num: Optional[int] = None, msg_id: Optional[int] = None):
+        return self._mine(self.mt5.positions_get(symbol=self.symbol), ch_num, msg_id)
 
-    def orders(self, msg_id: Optional[int] = None):
-        return self._mine(self.mt5.orders_get(symbol=self.symbol), msg_id)
+    def orders(self, ch_num: Optional[int] = None, msg_id: Optional[int] = None):
+        return self._mine(self.mt5.orders_get(symbol=self.symbol), ch_num, msg_id)
 
     def min_stop_distance(self) -> float:
         """Distancia mínima (USD) entre precio y SL/TP que exige el broker."""
@@ -125,8 +129,8 @@ class Trader:
         vol = min(max(vol, vmin), vmax)
         return round(vol, max(0, -int(math.floor(math.log10(step)))))
 
-    def _total_volume(self, plan: OrderPlan) -> float:
-        """Lote TOTAL de la señal (fijo, o por % de riesgo sobre la equity)."""
+    def _total_volume(self, plan: OrderPlan, lot: Optional[float] = None) -> float:
+        """Lote TOTAL de la señal (fijo, o por % de riesgo sobre la equity). `lot`: lote propio del canal."""
         risk_pct = self.cfg["risk_percent"]
         if risk_pct > 0:
             loss_per_lot = (abs(plan.price - plan.sl) / self.si.trade_tick_size
@@ -134,7 +138,7 @@ class Trader:
             if loss_per_lot > 0:
                 equity = self.mt5.account_info().equity
                 return equity * risk_pct / 100 / loss_per_lot
-        return self.cfg["lot_size"]
+        return lot or self.cfg["lot_size"]
 
     def _split_volumes(self, total: float, n: int) -> List[float]:
         """Reparte `total` en hasta n órdenes, cada una >= volume_min.
@@ -217,41 +221,45 @@ class Trader:
         return False
 
     # -------------------------------------------------------------- señales
-    def open_signal(self, sig: Signal, msg_id: int) -> int:
-        """Abre las órdenes de una señal. Devuelve cuántas se enviaron."""
+    def open_signal(self, sig: Signal, msg_id: int, channel: Optional[dict] = None) -> int:
+        """Abre las órdenes de una señal de `channel`. Devuelve cuántas se enviaron."""
         m, c = self.mt5, self.cfg
+        ch = channel or {"num": 1, "title": ""}
+        num = ch.get("num", 1)
+        who = f"[{ch['title']}] " if ch.get("title") else ""
+        max_tps = ch.get("max_tps") or c["max_tps"]
         tick = m.symbol_info_tick(self.symbol)
         if tick is None:
             log.error("Sin precio para %s", self.symbol)
-            self.notify(f"❌ Señal {msg_id} no operada: sin precio de {self.symbol}", "error")
+            self.notify(f"❌ {who}Señal {msg_id} no operada: sin precio de {self.symbol}", "error")
             return 0
         try:
             plans = plan_orders(
                 sig, tick.bid, tick.ask,
                 market_tolerance=c["market_tolerance"],
                 max_pending_distance=c["max_pending_distance"],
-                max_tps=c["max_tps"], allow_no_tp=c["allow_no_tp"],
+                max_tps=max_tps, allow_no_tp=c["allow_no_tp"],
             )
             plans, adjustments = apply_stops_level(
                 plans, tick.bid, tick.ask, self.min_stop_distance(),
                 c["stops_policy"], self.si.point)
             if adjustments:
-                self.notify(f"⚠️ Señal {msg_id}: niveles ajustados a la distancia mínima del "
+                self.notify(f"⚠️ {who}Señal {msg_id}: niveles ajustados a la distancia mínima del "
                             f"broker: {'; '.join(sorted(set(adjustments)))}", "warn")
         except Skip as e:
             log.warning("Señal %s ignorada: %s", msg_id, e)
-            self.notify(f"⚠️ Señal {msg_id} ignorada: {e}", "warn")
+            self.notify(f"⚠️ {who}Señal {msg_id} ignorada: {e}", "warn")
             return 0
 
         open_now = len(self.positions()) + len(self.orders())
         if open_now + len(plans) > c["max_open_positions"]:
             log.warning("Señal %s ignorada: límite max_open_positions=%s (hay %s)",
                         msg_id, c["max_open_positions"], open_now)
-            self.notify(f"⚠️ Señal {msg_id} ignorada: ya hay {open_now} operaciones/pendientes "
+            self.notify(f"⚠️ {who}Señal {msg_id} ignorada: ya hay {open_now} operaciones/pendientes "
                         f"(máximo {c['max_open_positions']})", "warn")
             return 0
 
-        vols = self._split_volumes(self._total_volume(plans[0]), len(plans))
+        vols = self._split_volumes(self._total_volume(plans[0], ch.get("lot_size") or None), len(plans))
         if len(vols) < len(plans):
             log.warning("Lote total insuficiente para %s órdenes (mínimo %s): se abren %s",
                         len(plans), self.si.volume_min, len(vols))
@@ -264,7 +272,7 @@ class Trader:
             req = {
                 "symbol": self.symbol, "volume": vol,
                 "sl": round(p.sl, digits), "tp": round(p.tp, digits),
-                "magic": self.magic, "comment": f"{self._tag(msg_id)}:{n}",
+                "magic": self.magic, "comment": f"{self._tag(num, msg_id)}:{n}",
                 "type_time": m.ORDER_TIME_GTC,
             }
             if p.kind == "market":
@@ -289,39 +297,45 @@ class Trader:
             label = f"{p.side} {p.kind} {vol} lotes TP={p.tp or '-'} (msg {msg_id})"
             sent += self._send(req, label, guard=(p.kind == "market"))
         tps = ", ".join(str(p.tp) if p.tp else "-" for p in plans)
-        self.notify(f"{'✅' if sent == len(plans) else '⚠️'} Señal {msg_id}: {plans[0].side} "
+        self.notify(f"{'✅' if sent == len(plans) else '⚠️'} {who}Señal {msg_id}: {plans[0].side} "
                     f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
                     f"SL {plans[0].sl} | TP {tps}", "info")
         return sent
 
     # ------------------------------------------------------------- comandos
-    def handle_command(self, cmd: Command, msg_id: Optional[int]) -> None:
-        """msg_id = mensaje de la señal original (si el comando es una respuesta);
-        None = aplica a todas las posiciones del bot."""
-        scope = f"señal {msg_id}" if msg_id else "todas las del bot"
-        log.info("Comando %s %s (%s)", cmd.kind, cmd.value or "", scope)
-        self.notify(f"🔧 Comando del canal: {cmd.kind} {cmd.value or ''} ({scope})", "info")
+    def handle_command(self, cmd: Command, msg_id: Optional[int] = None,
+                       channel: Optional[dict] = None) -> None:
+        """msg_id = mensaje de la señal original (si el comando es una respuesta).
+        Sin msg_id aplica a todas las operaciones del canal `channel` (o del bot, si no se indica)."""
+        num = channel.get("num") if channel else None
+        who = f"[{channel['title']}] " if channel and channel.get("title") else ""
+        if msg_id:
+            scope = f"señal {msg_id}"
+        else:
+            scope = "todas las de este canal" if num is not None else "todas las del bot"
+        log.info("%sComando %s %s (%s)", who, cmd.kind, cmd.value or "", scope)
+        self.notify(f"🔧 {who}Comando del canal: {cmd.kind} {cmd.value or ''} ({scope})", "info")
         if cmd.kind == "cancel":
-            self._cancel(msg_id)
+            self._cancel(num, msg_id)
         elif cmd.kind == "close":
-            self._close(msg_id, 1.0)
+            self._close(num, msg_id, 1.0)
         elif cmd.kind == "partial":
-            self._close(msg_id, cmd.value)
+            self._close(num, msg_id, cmd.value)
         elif cmd.kind == "breakeven":
-            self._set_sl(msg_id, None)
+            self._set_sl(num, msg_id, None)
         elif cmd.kind == "move_sl":
-            self._set_sl(msg_id, cmd.value)
+            self._set_sl(num, msg_id, cmd.value)
 
-    def _cancel(self, msg_id) -> None:
+    def _cancel(self, num, msg_id) -> None:
         m = self.mt5
-        for o in self.orders(msg_id):
+        for o in self.orders(num, msg_id):
             self._send({"action": m.TRADE_ACTION_REMOVE, "order": o.ticket},
                        f"cancelar orden {o.ticket}")
 
-    def _close(self, msg_id, fraction: float) -> None:
+    def _close(self, num, msg_id, fraction: float) -> None:
         m = self.mt5
         tick = m.symbol_info_tick(self.symbol)
-        for p in self.positions(msg_id):
+        for p in self.positions(num, msg_id):
             vol = p.volume if fraction >= 1 else self._norm_volume(p.volume * fraction)
             if fraction < 1 and p.volume - vol < self.si.volume_min:
                 log.info("Posición %s muy pequeña para cierre parcial", p.ticket)
@@ -335,12 +349,12 @@ class Trader:
                 "comment": p.comment[:31],
             }, f"cerrar {vol} de posición {p.ticket}")
 
-    def _set_sl(self, msg_id, price: Optional[float]) -> None:
+    def _set_sl(self, num, msg_id, price: Optional[float]) -> None:
         """price=None -> break-even (precio de apertura + be_offset a favor)."""
         m = self.mt5
         tick = m.symbol_info_tick(self.symbol)
         digits = self.si.digits
-        for p in self.positions(msg_id):
+        for p in self.positions(num, msg_id):
             buy = p.type == m.POSITION_TYPE_BUY
             if price is None:
                 off = self.cfg["be_offset"]

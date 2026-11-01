@@ -113,6 +113,42 @@ class TelegramHelper:
         except Exception as e:  # noqa: BLE001
             raise self._friendly(e) from e
 
+    def overview(self) -> dict:
+        """Canales/grupos y carpetas de Telegram:
+        {channels: [{id,name,username,kind,muted,archived,unread}], folders: [{id,title,members}],
+         folders_error: str}. Si no se pueden leer las carpetas, se devuelven solo los canales."""
+        from telethon import functions, utils
+
+        from .channels import build_folders
+
+        async def go():
+            import time as _time
+            dialogs = []
+            async for d in self.client.iter_dialogs():
+                if not (d.is_channel or d.is_group):
+                    continue
+                mute = getattr(getattr(getattr(d, "dialog", None), "notify_settings", None), "mute_until", None)
+                try:
+                    muted = bool(mute) and (mute.timestamp() if hasattr(mute, "timestamp") else float(mute)) > _time.time()
+                except Exception:  # noqa: BLE001
+                    muted = False
+                dialogs.append({"id": d.id, "name": d.name or "(sin nombre)",
+                                "username": getattr(d.entity, "username", None) or "",
+                                "kind": "grupo" if d.is_group else "canal", "muted": muted,
+                                "archived": bool(getattr(d, "archived", False)),
+                                "unread": int(getattr(d, "unread_count", 0) or 0)})
+            folders, err = [], ""
+            try:
+                res = await self.client(functions.messages.GetDialogFiltersRequest())
+                folders = build_folders(getattr(res, "filters", res), dialogs, utils.get_peer_id)
+            except Exception as e:  # noqa: BLE001 - las carpetas son un extra: no deben impedir elegir canal
+                err = f"{type(e).__name__}: {e}"
+            return {"channels": dialogs, "folders": folders, "folders_error": err}
+        try:
+            return self._run(go(), timeout=180)
+        except Exception as e:  # noqa: BLE001
+            raise self._friendly(e) from e
+
     def send_to_me(self, text: str) -> None:
         try:
             self._run(self.client.send_message("me", text))

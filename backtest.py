@@ -36,7 +36,13 @@ async def fetch(a) -> None:
              else datetime.now(timezone.utc) - timedelta(days=a.days))
     client = TelegramClient(cfg["session_name"], cfg["api_id"], cfg["api_hash"])
     await client.start(phone=cfg["phone"] or None)
-    ref = cfg["channel"].strip()
+    chans = [c for c in cfg["channels"] if c["enabled"]] or cfg["channels"]
+    if a.channel:                                    # --channel acepta @usuario, id o el número del canal
+        pick = [c for c in cfg["channels"] if a.channel in (c["ref"], str(c["num"]), "@" + c["ref"].lstrip("@"))]
+        chans = pick or [{"ref": a.channel}]
+    if not chans:
+        raise SystemExit("No hay canales configurados: elige uno en el asistente o con --channel.")
+    ref = chans[0]["ref"].strip()
     entity = await client.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref)
     out = []
     async for m in client.iter_messages(entity, reverse=True, offset_date=since):
@@ -121,6 +127,7 @@ def main() -> None:
     f.add_argument("--days", type=int, default=90)
     f.add_argument("--since", help="YYYY-MM-DD (UTC); reemplaza --days")
     f.add_argument("--out", default="history.json")
+    f.add_argument("--channel", default="", help="@usuario, id o número del canal (por defecto, el primero)")
 
     r = sub.add_parser("run", help="simula las señales")
     r.add_argument("--history", default="history.json")

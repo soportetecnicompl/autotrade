@@ -29,7 +29,7 @@ class OpenSignalTests(unittest.TestCase):
         r1, r2 = t.mt5.sent
         self.assertEqual((r1["volume"], r2["volume"]), (0.01, 0.01))
         self.assertEqual((r1["tp"], r2["tp"]), (2640.0, 2630.0))
-        self.assertEqual((r1["comment"], r2["comment"]), ("tg55:1", "tg55:2"))
+        self.assertEqual((r1["comment"], r2["comment"]), ("tg1.55:1", "tg1.55:2"))
         self.assertEqual((r1["action"], r1["type"], r1["price"]), (1, 1, 2650.0))
         self.assertEqual((r1["magic"], r1["sl"]), (777, 2662.0))
         self.assertEqual(t.msgs[-1][0], "info")
@@ -82,7 +82,53 @@ class OpenSignalTests(unittest.TestCase):
 
 
 SELL = "SELL GOLD 2650 SL 2662 TP 2640"
+SELL_SIG = SELL
 BUY = "BUY GOLD 2650 SL 2640 TP 2660"
+
+
+CH_A = {"num": 1, "title": "IC GOLD", "lot_size": 0.0, "max_tps": 0}
+CH_B = {"num": 2, "title": "Gold Pro", "lot_size": 0.04, "max_tps": 1}
+
+
+class MultiChannelTests(unittest.TestCase):
+    def test_tags_include_channel_so_message_ids_never_collide(self):
+        t = make()
+        sig = parse(SELL_SIG).signal
+        t.open_signal(sig, 100, CH_A)
+        t.open_signal(sig, 100, CH_B)                       # mismo id de mensaje, otro canal
+        self.assertEqual([r["comment"] for r in t.mt5.sent if r["comment"].endswith(":1")],
+                         ["tg1.100:1", "tg2.100:1"])
+
+    def test_channel_overrides_lot_and_tps_and_titles_the_alerts(self):
+        t = make()
+        t.open_signal(parse("SELL GOLD 2650 SL 2662 TP1 2640 TP2 2630").signal, 7, CH_B)
+        self.assertEqual(len(t.mt5.sent), 1)                # max_tps del canal = 1
+        self.assertEqual(t.mt5.sent[0]["volume"], 0.04)     # lote propio del canal
+        self.assertTrue(t.msgs[-1][1].startswith("✅ [Gold Pro] Señal 7"))
+        t2 = make()
+        t2.open_signal(parse("SELL GOLD 2650 SL 2662 TP1 2640 TP2 2630").signal, 7, CH_A)
+        self.assertEqual([r["volume"] for r in t2.mt5.sent], [0.01, 0.01])   # usa los generales (0.02, 2 TPs)
+
+    def test_command_without_reply_only_touches_its_own_channel(self):
+        t = make()
+        t.mt5.pos = [position(11, "SELL", 2650, volume=0.01, comment="tg1.5:1"),
+                     position(12, "SELL", 2650, volume=0.01, comment="tg2.5:1"),
+                     position(13, "SELL", 2650, volume=0.01, comment="tg2.9:1")]
+        t.handle_command(Command("close"), None, CH_B)       # "close all" del canal B
+        self.assertEqual(sorted(r["position"] for r in t.mt5.sent), [12, 13])
+
+    def test_reply_scope_is_per_channel_and_message(self):
+        t = make()
+        t.mt5.pos = [position(11, "SELL", 2650, volume=0.01, comment="tg1.5:1"),
+                     position(12, "SELL", 2650, volume=0.01, comment="tg2.5:1")]
+        t.handle_command(Command("close"), 5, CH_B)          # reply al mensaje 5 DEL CANAL B
+        self.assertEqual([r["position"] for r in t.mt5.sent], [12])
+
+    def test_global_position_limit_counts_all_channels(self):
+        t = make(max_open_positions=2)
+        t.mt5.pos = [position(1, "SELL", 2650, comment="tg1.1:1"), position(2, "SELL", 2650, comment="tg2.1:1")]
+        self.assertEqual(t.open_signal(parse(SELL_SIG).signal, 3, CH_A), 0)
+        self.assertIn("máximo 2", t.msgs[-1][1])
 
 
 class RetryTests(unittest.TestCase):
@@ -172,7 +218,7 @@ class CommandTests(unittest.TestCase):
         t = make()
         t.mt5.pos = [position(11, "SELL", 2650, volume=0.01), position(12, "BUY", 2640, volume=0.01),
                      position(13, "BUY", 2640, magic=1)]                        # otro magic: no se toca
-        t.mt5.ords = [NS(ticket=21, magic=777, comment="tg1:2")]
+        t.mt5.ords = [NS(ticket=21, magic=777, comment="tg1.1:2")]
         for c in parse("230 pips , close all").commands:
             t.handle_command(c, None)
         reqs = {r.get("position") or r.get("order"): r for r in t.mt5.sent}
@@ -183,7 +229,7 @@ class CommandTests(unittest.TestCase):
 
     def test_scope_by_reply(self):
         t = make()
-        t.mt5.pos = [position(11, "SELL", 2650, comment="tg1:1"), position(12, "SELL", 2650, comment="tg2:1")]
+        t.mt5.pos = [position(11, "SELL", 2650, comment="tg1.1:1"), position(12, "SELL", 2650, comment="tg1.2:1")]
         t.handle_command(Command("close"), 2)
         self.assertEqual([r["position"] for r in t.mt5.sent], [12])
 
