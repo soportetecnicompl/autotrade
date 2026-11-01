@@ -54,6 +54,21 @@ Edita `config.ini` (nunca lo subas a git; ya está en `.gitignore`).
 
 Tests: `python -m unittest discover -s tests -t .`
 
+## Backtest del canal
+
+Antes de operar, mide si las señales del canal habrían sido rentables con TUS reglas (mismo parser y planificador que el bot).
+
+```bat
+python backtest.py fetch --days 90 --out history.json
+python backtest.py run --history history.json --prices mt5 --server-offset 2 --us-dst --lot 0.02
+```
+
+- `--prices mt5` usa las velas M1 de tu terminal (Windows). El broker solo guarda cierta historia: abre el gráfico M1 del símbolo, sube *Max bars in chart* y desplázate hacia atrás. Alternativa: `--prices xauusd_m1.csv` (formato `time,open,high,low,close` o export de MT5).
+- **`--server-offset` es crítico**: horas del servidor de tu broker respecto a UTC en invierno (muchos brokers: 2, con `--us-dst` suman 1 h en verano de EE. UU.). Si lo pones mal, señales y precios quedan desalineados y el resultado no sirve. Verifícalo mirando la hora de un mensaje del canal contra la vela del mismo movimiento.
+- Compara dos modos: **static** (solo SL/TP originales) y **follow** (además obedece "BE", "close all", "close half"...). Entrega % de acierto, % de TP1, factor de beneficio, drawdown, peor racha, y tablas por hora y por día. `backtest_trades.csv` trae el detalle orden por orden.
+- Reglas conservadoras: si SL y TP caen en la misma vela, gana el SL; en la vela donde se llena una pendiente solo cuenta el SL; spread fijo (`--spread`), retraso de ejecución (`--delay`) y cierre forzado a las `--max-hold-hours`.
+- Límites: velas M1 no dicen el orden real dentro del minuto, no modela slippage ni swaps, y los mensajes borrados o editados del canal no aparecen tal como se vieron en vivo. Úsalo para descartar canales malos, no como promesa de resultados.
+
 ## Importante
 
 - Nada de esto garantiza ganancias; muchos canales de señales pierden dinero. Valida con demo.

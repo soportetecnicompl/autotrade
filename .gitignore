@@ -4,3 +4,5 @@ config.ini
 autotrade.log
 __pycache__/
 .venv/
+history.json
+backtest_trades.csv
