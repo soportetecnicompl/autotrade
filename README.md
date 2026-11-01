@@ -54,6 +54,22 @@ Edita `config.ini` (nunca lo subas a git; ya está en `.gitignore`).
 
 Tests: `python -m unittest discover -s tests -t .`
 
+## Filtro de horario
+
+En `config.ini`, sección `[filters]`, limitas en qué días y horas se aceptan señales **nuevas**:
+
+```ini
+[filters]
+trading_days = Mon-Fri
+trading_hours = 08:00-12:00, 14:00-18:00
+tz_offset_hours = -6
+```
+
+- La hora que cuenta es la del mensaje en Telegram (no la del momento en que el bot lo procesa), escrita en la zona `tz_offset_hours` (Honduras = -6). El fin de cada ventana es exclusivo; se admite cruzar medianoche (`22:00-02:00`).
+- Vacío = sin restricción. Los comandos del canal (BE, close all, cancelar) **siempre** se obedecen, aunque estén fuera de horario, para no dejar posiciones abiertas sin gestionar.
+- Las posiciones ya abiertas no se cierran al terminar el horario; eso lo gestionan su SL/TP.
+- Pruébalo antes con el backtester usando las mismas reglas: `python backtest.py run ... --trading-days Mon-Fri --trading-hours "08:00-12:00" --report-tz -6`. Cuidado con sobreajustar: elegir horas mirando solo el pasado de un canal suele dar resultados que no se repiten; busca patrones con muchas señales, no con 3 o 4.
+
 ## Backtest del canal
 
 Antes de operar, mide si las señales del canal habrían sido rentables con TUS reglas (mismo parser y planificador que el bot).

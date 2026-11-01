@@ -20,6 +20,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
+from autotrade.schedule import TradingSchedule
 from autotrade.backtest import (Msg, Prices, SimConfig, is_us_dst, load_csv, make_offset_fn,
                                 report, simulate, write_trades_csv)
 
@@ -90,7 +91,10 @@ def run(a) -> None:
     cfg = SimConfig(lot=a.lot, spread=a.spread, delay=a.delay, max_hold_hours=a.max_hold_hours,
                     pending_expiry_min=a.pending_expiry_min, max_tps=a.max_tps,
                     market_tolerance=a.market_tolerance, volume_min=a.volume_min,
-                    volume_step=a.volume_step)
+                    volume_step=a.volume_step,
+                    schedule=TradingSchedule.from_text(a.trading_days, a.trading_hours, a.report_tz))
+    if cfg.schedule and not cfg.schedule.always:
+        print("Filtro de horario:", cfg.schedule.describe())
     results, skipped = {}, Counter()
     for follow in (False, True):
         sk = Counter()
@@ -128,7 +132,10 @@ def main() -> None:
     r.add_argument("--market-tolerance", type=float, default=1.5)
     r.add_argument("--volume-min", type=float, default=0.01)
     r.add_argument("--volume-step", type=float, default=0.01)
-    r.add_argument("--report-tz", type=float, default=-6.0, help="zona horaria para las tablas (Honduras = -6)")
+    r.add_argument("--report-tz", type=float, default=-6.0,
+                   help="zona horaria de tablas y filtros de horario (Honduras = -6)")
+    r.add_argument("--trading-hours", default="", help='ej. "08:00-12:00,14:00-18:00" (en --report-tz)')
+    r.add_argument("--trading-days", default="", help='ej. "Mon-Fri"')
     r.add_argument("--out", default="backtest_trades.csv")
 
     a = ap.parse_args()

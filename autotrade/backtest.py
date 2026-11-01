@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .parser import Command, ParseResult, parse
 from .planner import OrderPlan, Skip, plan_orders
+from .schedule import TradingSchedule
 
 Bar = Tuple[int, float, float, float, float]  # ts_servidor, o, h, l, c
 
@@ -109,6 +110,7 @@ class SimConfig:
     allow_no_tp: bool = False
     volume_min: float = 0.01
     volume_step: float = 0.01
+    schedule: Optional[TradingSchedule] = None   # filtro de horario (None = sin filtro)
 
 
 @dataclass
@@ -249,6 +251,10 @@ def simulate(msgs: List[Msg], P: Prices, cfg: SimConfig, follow_updates: bool,
     for m, r in parsed:
         sig = r.signal
         if not sig:
+            continue
+        if cfg.schedule is not None and not cfg.schedule.allows(m.ts):
+            if skipped is not None:
+                skipped["fuera de horario"] += 1
             continue
         if not P.covers(m.ts + cfg.delay):
             if skipped is not None:

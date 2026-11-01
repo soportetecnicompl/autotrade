@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from autotrade.parser import parse
 from autotrade.planner import Skip, plan_orders
+from autotrade.schedule import TradingSchedule
 
 log = logging.getLogger("main")
 
@@ -25,7 +26,15 @@ def load_config(path: str) -> dict:
     if not cp.read(path, encoding="utf-8"):
         raise SystemExit(f"No encuentro {path}. Copia config.example.ini a config.ini y edítalo.")
     t, m, r = cp["telegram"], cp["mt5"], cp["trading"]
+    f = cp["filters"] if cp.has_section("filters") else {}
+    try:
+        schedule = TradingSchedule.from_text(
+            f.get("trading_days", ""), f.get("trading_hours", ""),
+            float(f.get("tz_offset_hours", 0) or 0))
+    except ValueError as e:
+        raise SystemExit(f"[filters] en {path}: {e}")
     return {
+        "schedule": schedule,
         "api_id": t.getint("api_id"), "api_hash": t["api_hash"],
         "phone": t.get("phone", ""), "channel": t["channel"],
         "session_name": t.get("session_name", "autotrade"),
@@ -85,6 +94,8 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
     ref = cfg["channel"].strip()
     entity = await client.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref)
     log.info("Escuchando '%s'. dry_run=%s", getattr(entity, "title", ref), cfg["dry_run"])
+    sched = cfg["schedule"]
+    log.info("Filtro de horario: %s", "sin restricción" if sched.always else sched.describe())
 
     @client.on(events.NewMessage(chats=entity))
     async def on_message(event):
@@ -99,6 +110,9 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
                 age = (datetime.now(timezone.utc) - event.message.date).total_seconds()
                 if age > cfg["max_signal_age_sec"]:
                     log.warning("Señal %s ignorada: tiene %.0fs de antigüedad", msg_id, age)
+                    return
+                if not sched.allows(event.message.date.timestamp()):
+                    log.info("Señal %s ignorada: fuera de horario (%s)", msg_id, sched.describe())
                     return
                 trader.open_signal(res.signal, msg_id)
             elif cfg["enable_commands"]:
