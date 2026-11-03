@@ -6,6 +6,7 @@ para iniciar/detener el bot y ver su registro.
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import socket
@@ -909,12 +910,29 @@ class TradingStep(Step):
         r = ttk.Frame(self); r.pack(anchor="w", pady=4)
         ttk.Label(r, text="Máx. posiciones abiertas", width=24).pack(side="left")
         ttk.Spinbox(r, from_=1, to=50, textvariable=v["max_open_positions"], width=8).pack(side="left")
+        r = ttk.Frame(self); r.pack(anchor="w", pady=4)
+        ttk.Label(r, text="SL automático si falta", width=24).pack(side="left")
+        ttk.Entry(r, textvariable=v["default_sl_pips"], width=8).pack(side="left")
+        ttk.Label(r, text="pips", width=5).pack(side="left", padx=(6, 0))
+        self.sl_hint = ttk.Label(self, text="", style="Muted.TLabel", wraplength=WRAP)
+        self.sl_hint.pack(anchor="w")
+        v["default_sl_pips"].trace_add("write", lambda *_: self.update_sl_hint())
+        self.update_sl_hint()
         ttk.Checkbutton(self, text="Obedecer los mensajes del canal («mover a BE», «cerrar todo», «cerrar mitad»…)",
                         variable=v["enable_commands"]).pack(anchor="w", pady=6)
         box = ttk.LabelFrame(self, text=" Si el SL/TP queda más cerca de lo que permite tu broker ", padding=8)
         box.pack(fill="x", pady=6)
         ttk.Radiobutton(box, text="No operar esa señal y avisarme (recomendado)", variable=v["stops_policy"], value="skip").pack(anchor="w")
         ttk.Radiobutton(box, text="Alejar el SL/TP hasta el mínimo (cambia el riesgo de la señal)", variable=v["stops_policy"], value="adjust").pack(anchor="w")
+
+    def update_sl_hint(self):
+        try:
+            pips = float(self.app.v["default_sl_pips"].get().replace(",", "."))
+        except ValueError:
+            return self.sl_hint.config(text="")
+        self.sl_hint.config(text=(f"Si una señal no trae SL, se le pone uno automático a {pips:g} pips "
+                                  f"({pips * 0.10:g} USD de recorrido; en el oro 1 pip = 0.10 USD)." if pips > 0 else
+                                  "Con 0, las señales que no traen SL NO se operan."))
 
     def check(self):
         return sl.validate_trading(self.app.sync_settings())
@@ -1276,7 +1294,8 @@ class BacktestStep(Step):
                   "--balance", str(bal), "--report-tz", f"{s.tz_offset_hours:g}",
                   "--report", str(self.report_path(ch)),
                   "--out", str(data_dir() / f"backtest_trades_c{ch.num}.csv"),
-                  "--pip-size", f"{ch.pip_size:g}", "--late-sl-min", str(ch.late_sl_min)]
+                  "--pip-size", f"{ch.pip_size:g}", "--late-sl-min", str(ch.late_sl_min),
+                  "--default-sl-pips", f"{s.default_sl_pips:g}"]
                  + (["--us-dst"] if self.dst.get() else [])
                  + (["--tp-pips", ch.tp_pips] if ch.tp_pips.strip() else [])
                  + (["--entry-then-sl", "--emergency-sl-pips", f"{ch.emergency_sl_pips:g}"] if ch.entry_then_sl else [])]
@@ -1366,7 +1385,7 @@ class StartupStep(Step):
 
 class PanelStep(Step):
     title, short = "Panel de control", "Panel"
-    RESULTS = {"operada": ("✅ Operada", "ok"), "parcial": ("◐ Parcial", "warn"), "ignorada": ("⏭ Ignorada", "muted"),
+    RESULTS = {"operada": ("✅ Operada", "ok"), "simulada": ("🧪 Simulada", "info"), "parcial": ("◐ Parcial", "warn"), "ignorada": ("⏭ Ignorada", "muted"),
                "comando": ("🔧 Comando", "info"), "revisar": ("🔎 Revisar", "warn"), "error": ("❌ Error", "bad")}
 
     def build(self):
@@ -1384,6 +1403,12 @@ class PanelStep(Step):
         self.pause_btn = ttk.Button(r, text="⏸  Pausar señales", command=self.toggle_pause)
         self.pause_btn.pack(side="left")
         self.limit_btn = ttk.Button(r, text="Seguir hoy", command=self.resume_today)   # solo se muestra si saltó el límite
+        r2 = ttk.Frame(self)
+        r2.pack(anchor="w", pady=(0, 2))
+        self.mode_btn = ttk.Button(r2, text="Cambiar a modo REAL", command=self.switch_mode)
+        self.mode_btn.pack(side="left")
+        self.restart_btn = ttk.Button(r2, text="↻  Reiniciar", command=self.restart_bot)
+        self.restart_btn.pack(side="left", padx=8)
         self.st = self.status()
 
         self.nb = ttk.Notebook(self)
@@ -1476,6 +1501,13 @@ class PanelStep(Step):
     def control(self) -> Control:
         return Control(data_dir() / "control.json")
 
+    def bot_status(self) -> Optional[dict]:
+        """Estado que escribe el programa al arrancar: en qué modo está REALMENTE y con qué configuración."""
+        try:
+            return json.loads((data_dir() / "bot_status.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
     def limit_state(self):
         """Estado del límite diario de HOY (None si no aplica o no ha saltado)."""
         st = RiskGuard(data_dir() / "risk_state.json").state
@@ -1484,10 +1516,19 @@ class PanelStep(Step):
 
     def refresh(self):
         s = self.app.settings
-        if s.dry_run:
-            self.mode.config(text="MODO SIMULACIÓN — no se abren operaciones reales", foreground=WARN)
+        running = self.app.bot_running()
+        status = self.bot_status() if running else None
+        live_dry = status["dry_run"] if status else s.dry_run          # el modo del programa EN MARCHA, si lo hay
+        mismatch = bool(status) and status["dry_run"] != s.dry_run
+        try:
+            cfg_changed = bool(status) and (data_dir() / "config.ini").stat().st_mtime > status.get("config_mtime", 0) + 2
+        except OSError:
+            cfg_changed = False
+        if live_dry:
+            self.mode.config(text="MODO SIMULACIÓN — NO se abren operaciones en MetaTrader", foreground=WARN)
         else:
-            self.mode.config(text="MODO REAL — se enviarán órdenes a tu cuenta", foreground=BAD)
+            self.mode.config(text="MODO REAL — se envían órdenes a tu cuenta", foreground=BAD)
+        self.mode_btn.config(text="Cambiar a modo REAL" if s.dry_run else "Volver a modo SIMULACIÓN")
         sched = "sin restricción" if not s.filter_enabled else f"{days_label(s.trading_days)} · {s.trading_hours} (UTC{s.tz_offset_hours:+g})"
         ctl = self.control().read()
         chans = "; ".join(
@@ -1510,10 +1551,10 @@ class PanelStep(Step):
         self.summary.config(text=(f"Canales: {chans}\nSímbolo: {s.symbol}  |  Lote total: {s.lot_size}  |  TPs: {s.max_tps}  |  "
                                   f"Horario: {sched}\nProtecciones: {', '.join(prot) or 'ninguna'}  |  "
                                   f"Avisos por Telegram: {'sí' if s.alerts_enabled else 'no'}"))
-        running = self.app.bot_running()
         paused = ctl["paused"]
         self.start_btn.state(["disabled" if running else "!disabled"])
         self.stop_btn.state(["!disabled" if running else "disabled"])
+        self.restart_btn.state(["!disabled" if running else "disabled"])
         self.pause_btn.config(text="▶  Reanudar señales" if paused else "⏸  Pausar señales")
         tripped = self.limit_state()
         if tripped and not self.limit_btn.winfo_ismapped():
@@ -1522,11 +1563,22 @@ class PanelStep(Step):
             self.limit_btn.pack_forget()
         if tripped:
             self.set_status(self.st, f"🛑 Límite diario alcanzado: {tripped.reason}. No se abren señales nuevas hoy.", "bad")
+        elif mismatch:
+            now = "SIMULACIÓN" if status["dry_run"] else "REAL"
+            want = "REAL" if status["dry_run"] else "SIMULACIÓN"
+            self.set_status(self.st, f"⚠ El programa en marcha sigue en modo {now}, pero la configuración dice {want}. "
+                                     f"Pulsa «Reiniciar» para aplicar el cambio.", "warn")
+        elif cfg_changed:
+            self.set_status(self.st, "⚠ Cambiaste la configuración después de iniciar el programa. "
+                                     "Pulsa «Reiniciar» para que se aplique.", "warn")
         elif paused:
             self.set_status(self.st, "⏸ EN PAUSA: no se abren señales nuevas (los mensajes de gestión siguen funcionando).", "warn")
+        elif running and live_dry:
+            self.set_status(self.st, "● FUNCIONANDO en SIMULACIÓN: analiza las señales pero NO abre nada en MetaTrader. "
+                                     "Para operar de verdad pulsa «Cambiar a modo REAL».", "warn")
         elif running:
-            self.set_status(self.st, f"● El programa está FUNCIONANDO (proceso {read_pid()}).", "ok")
-        elif not self.st.cget("text") or self.st.cget("text")[:1] in "●⏸🛑":
+            self.set_status(self.st, f"● FUNCIONANDO en modo REAL: las señales se envían a MetaTrader (proceso {read_pid()}).", "ok")
+        elif not self.st.cget("text") or self.st.cget("text")[:1] in "●⏸🛑⚠":
             self.set_status(self.st, "○ Detenido. Pulsa «Iniciar» para empezar.", "info")
         self.refresh_inbox()
         self.tail()
@@ -1609,12 +1661,12 @@ class PanelStep(Step):
         self.log.config(state="disabled")
 
     # ---- control
-    def start(self):
+    def start(self, confirmed: bool = False):
         s = self.app.sync_settings()
         errs = sl.validate_all(s)
         if errs:
             return messagebox.showwarning("Faltan datos", "Antes de iniciar, completa:\n\n• " + "\n• ".join(errs))
-        if not s.dry_run and not messagebox.askyesno(
+        if not s.dry_run and not confirmed and not messagebox.askyesno(
                 "Operar de verdad",
                 "Vas a iniciar en MODO REAL: se enviarán órdenes a tu cuenta de MetaTrader 5.\n\n"
                 "¿Ya probaste en simulación o demo y quieres continuar?", icon="warning"):
@@ -1633,12 +1685,37 @@ class PanelStep(Step):
         pid = read_pid()
         if pid and pid_alive(pid):
             stop_tree(pid)
-        try:
-            (data_dir() / PID_FILE).unlink()
-        except OSError:
-            pass
+        for name in (PID_FILE, "bot_status.json"):
+            try:
+                (data_dir() / name).unlink()
+            except OSError:
+                pass
         self.set_status(self.st, "○ Detenido.", "info")
         self.later(800, self.refresh)
+
+    def restart_bot(self, confirmed: bool = False):
+        """Detiene el programa y lo vuelve a iniciar para aplicar la configuración nueva."""
+        if self.app.bot_running():
+            self.stop()
+        self.set_status(self.st, "↻ Reiniciando…", "info")
+        self.later(1500, lambda: self.start(confirmed=confirmed))
+
+    def switch_mode(self):
+        s = self.app.sync_settings()
+        to_real = s.dry_run
+        if to_real and not messagebox.askyesno(
+                "Cambiar a modo REAL",
+                "En modo REAL el programa enviará órdenes a tu cuenta de MetaTrader 5 con dinero de verdad.\n\n"
+                "¿Ya probaste en simulación o en una cuenta demo y quieres continuar?", icon="warning"):
+            return
+        self.app.v["dry_run"].set(not s.dry_run)
+        self.app.sync_settings()
+        self.app.save()
+        if self.app.bot_running() and messagebox.askyesno(
+                "Reiniciar para aplicar", "El programa ya está en marcha: el cambio de modo solo se aplica al reiniciarlo.\n\n"
+                "¿Reiniciar ahora?"):
+            self.restart_bot(confirmed=True)
+        self.refresh()
 
     def toggle_pause(self):
         c = self.control()

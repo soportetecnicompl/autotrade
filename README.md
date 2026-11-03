@@ -46,6 +46,18 @@ Todo es opcional y se configura en el paso **«Protecciones»** del asistente (0
 
 Notas honestas: el límite diario se evalúa cada vez que llega una señal y cada 30 s; el rendimiento en simulación aparece vacío (no hay operaciones); el calendario automático usa una fuente pública de terceros cuyo formato no se pudo comprobar desde el entorno de desarrollo (por eso el modo manual es el garantizado); y el break-even automático olvida el seguimiento si se reinicia el programa a mitad de una señal (el BE por mensaje del canal sigue funcionando).
 
+## Simulación o real: ¿por qué no se abre nada en MetaTrader?
+
+El programa arranca en **modo simulación**: analiza las señales y anota lo que haría, pero **no envía ninguna orden a MetaTrader**. Para operar de verdad: panel → **«Cambiar a modo REAL»** (pide confirmación). Para que no se confunda con una operación real:
+
+- Los avisos de Telegram y la bandeja de señales dicen **«🧪 SIMULACIÓN … NO se abrió nada en MetaTrader»** (antes parecían una operación normal).
+- El panel muestra en grande el modo **del programa que está corriendo** (no solo el de la configuración) y avisa si no coinciden o si cambiaste la configuración después de iniciarlo: **los cambios solo se aplican al reiniciar** (botón «↻ Reiniciar»).
+- Si el programa está en modo real y aun así no aparece nada en MetaTrader, mira en el registro/Telegram los avisos ❌ con el código de MT5 (Algo Trading apagado, símbolo distinto, margen insuficiente…).
+
+## SL automático
+
+Si una señal **no trae SL**, se le pone uno automático a **100 pips** (en el oro 1 pip = 0.10 USD, o sea 10 USD de recorrido; medido desde la entrada). Se cambia en el paso «Cómo operar» («SL automático si falta»); con **0** esas señales no se operan. El aviso lo indica («🛡 La señal no traía SL…»). En los canales de «dos mensajes» se usa en su lugar el SL de emergencia de cada canal. Un «SELL»/«BUY» suelto en un canal que **no** está en modo «dos mensajes» no abre nada, pero aparece como «Revisar» con la indicación de activar ese modo.
+
 ## Canales que mandan la señal en dos mensajes
 
 Algunos canales escriben primero solo **«compra» o «venta»** (y ahí se abre la operación), después mandan el **SL** en otro mensaje y casi nunca ponen TP. Se activa por canal: paso «Canales» → marca el canal → **«Ajustes avanzados…»** → «Las manda en DOS mensajes».

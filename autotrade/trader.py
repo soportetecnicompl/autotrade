@@ -256,7 +256,9 @@ class Trader:
         # Señal sin SL/TP (canales que mandan la dirección primero y el SL después): se completa con
         # el SL de emergencia y el TP por defecto del canal, medidos en pips desde la entrada.
         pip = ch.get("pip_size") or 0.10
-        emergency = float(ch.get("emergency_sl_pips") or 0) if ch.get("entry_then_sl") else 0.0
+        two_msg = bool(ch.get("entry_then_sl"))
+        # Sin SL en la señal: canal de 2 mensajes -> SL de emergencia (llegará el real); resto -> SL automático.
+        emergency = float(ch.get("emergency_sl_pips") or 0) if two_msg else float(c.get("default_sl_pips", 0) or 0)
         try:
             tp_defaults = parse_pip_list(ch.get("tp_pips", ""))
         except ValueError:
@@ -329,14 +331,26 @@ class Trader:
             label = f"{p.side} {p.kind} {vol} lotes TP={p.tp or '-'} (msg {msg_id})"
             sent += self._send(req, label, guard=(p.kind == "market"))
         tps = ", ".join(str(p.tp) if p.tp else "-" for p in plans)
-        wait_sl = (f"\n⏳ SL de EMERGENCIA a {emergency:g} pips ({emergency * pip:g} USD): se reemplazará cuando el "
-                   f"canal mande su SL (hasta {ch.get('late_sl_min', 30)} min)." if provisional_sl else "")
-        self.notify(f"{'✅' if sent == len(plans) else '⚠️'} {who}Señal {msg_id}: {plans[0].side} "
-                    f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
-                    f"SL {plans[0].sl}{' (emergencia)' if provisional_sl else ''} | TP {tps}{wait_sl}", "info")
-        self.outcome = (("operada" if sent == len(plans) else "error" if sent == 0 else "parcial"),
-                        f"{sent}/{len(plans)} órdenes {plans[0].side} {plans[0].kind} | SL {plans[0].sl}"
-                        f"{' (emergencia)' if provisional_sl else ''} | TP {tps}")
+        sl_note = " (emergencia)" if provisional_sl and two_msg else " (automático)" if provisional_sl else ""
+        wait_sl = ""
+        if provisional_sl and two_msg:
+            wait_sl = (f"\n⏳ SL de EMERGENCIA a {emergency:g} pips ({emergency * pip:g} USD): se reemplazará cuando el "
+                       f"canal mande su SL (hasta {ch.get('late_sl_min', 30)} min).")
+        elif provisional_sl:
+            wait_sl = f"\n🛡 La señal no traía SL: se puso uno automático a {emergency:g} pips ({emergency * pip:g} USD)."
+        detail = (f"{sent}/{len(plans)} órdenes {plans[0].side} {plans[0].kind} | SL {plans[0].sl}{sl_note} | TP {tps}")
+        if self.dry_run and sent == len(plans):
+            # En simulación NO se abre nada en MetaTrader: que no parezca una operación real.
+            self.notify(f"🧪 SIMULACIÓN — {who}Señal {msg_id}: se habría abierto {plans[0].side} {plans[0].kind} | "
+                        f"lotes {vols} | SL {plans[0].sl}{sl_note} | TP {tps}\n"
+                        f"⚠️ NO se abrió nada en MetaTrader porque el programa está en modo simulación. "
+                        f"Para operar de verdad: panel → «Cambiar a modo REAL».", "info")
+            self.outcome = ("simulada", detail)
+        else:
+            self.notify(f"{'✅' if sent == len(plans) else '⚠️'} {who}Señal {msg_id}: {plans[0].side} "
+                        f"{plans[0].kind} | {sent}/{len(plans)} órdenes | lotes {vols} | "
+                        f"SL {plans[0].sl}{sl_note} | TP {tps}{wait_sl}", "info")
+            self.outcome = (("operada" if sent == len(plans) else "error" if sent == 0 else "parcial"), detail)
         if sent and self.guard is not None:
             self.guard.register_signal()
         return sent

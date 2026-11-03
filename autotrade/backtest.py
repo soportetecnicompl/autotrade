@@ -114,6 +114,7 @@ class SimConfig:
     # Canales que mandan la dirección primero y el SL después (misma lógica que el bot en vivo)
     entry_then_sl: bool = False
     emergency_sl_pips: float = 100.0
+    default_sl_pips: float = 100.0               # SL automático en canales normales cuando la señal no trae
     tp_pips: tuple = ()                          # TP por defecto en pips cuando la señal no trae
     pip: float = 0.10                            # USD por pip
     late_sl_min: int = 30
@@ -289,8 +290,8 @@ def simulate(msgs: List[Msg], P: Prices, cfg: SimConfig, follow_updates: bool,
             continue
         i0 = P.idx(m.ts + cfg.delay)
         o = P.bars[i0][1]
-        sig = fill_defaults(sig, o, o + cfg.spread, cfg.emergency_sl_pips if cfg.entry_then_sl else 0.0,
-                            cfg.tp_pips, cfg.pip)
+        sig = fill_defaults(sig, o, o + cfg.spread,
+                            cfg.emergency_sl_pips if cfg.entry_then_sl else cfg.default_sl_pips, cfg.tp_pips, cfg.pip)
         try:
             plans = plan_orders(sig, o, o + cfg.spread, market_tolerance=cfg.market_tolerance,
                                 max_pending_distance=cfg.max_pending_distance,

@@ -113,6 +113,23 @@ class ConfigTests(unittest.TestCase):
                                                pip_size=0.0, late_sl_min=0)])
         self.assertEqual(len(sl.validate_channel(bad)), 4)
 
+    def test_default_sl_setting_roundtrip_default_and_validation(self):
+        s = sl.Settings(api_id="1", api_hash="a" * 32, phone="+50499998888", default_sl_pips=150.0)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.ini"
+            p.write_text(sl.render_config(s), encoding="utf-8")
+            self.assertEqual(sl.load_settings(p).default_sl_pips, 150.0)
+            import main as bot_main
+            self.assertEqual(bot_main.load_config(str(p))["default_sl_pips"], 150.0)
+            old = Path(d) / "old.ini"
+            old.write_text("[telegram]\napi_id=1\napi_hash=a\n[mt5]\n[trading]\n", encoding="utf-8")
+            self.assertEqual(bot_main.load_config(str(old))["default_sl_pips"], 100.0)    # configuraciones viejas: 100 pips
+            self.assertEqual(sl.load_settings(old).default_sl_pips, 100.0)
+        self.assertEqual(sl.Settings().default_sl_pips, 100.0)
+        for bad in (-1.0, 9999.0):
+            self.assertTrue(any("SL automático" in e for e in sl.validate_trading(sl.Settings(default_sl_pips=bad))))
+        self.assertEqual(sl.validate_trading(sl.Settings(default_sl_pips=0.0)), [])
+
     def test_old_channel_sections_load_with_defaults(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "config.ini"
@@ -223,6 +240,75 @@ class TraderTests(unittest.TestCase):
         t.handle_command(Command("set_sl", 3898.0), None, CH)                                 # a 1.16 USD del ask 3896.84
         self.assertEqual(t.mt5.sent, [])
         self.assertTrue(any("el broker exige 3.00" in m for _, m in t.msgs))
+
+
+class DefaultSlTests(unittest.TestCase):
+    """Señal sin SL en un canal normal: se le pone un SL automático (por defecto 100 pips = 10 USD)."""
+    NORMAL = {"num": 2, "title": "Normal", "entry_then_sl": False}
+
+    def trader(self, **kw):
+        t = make(FakeMT5(bid=2650.0, ask=2650.3), **kw)
+        t.si.digits = 2
+        return t
+
+    def test_signal_without_sl_gets_the_automatic_one_and_keeps_its_tp(self):
+        t = self.trader(default_sl_pips=100.0, dry_run=False)
+        self.assertEqual(t.open_signal(Signal("SELL", tps=[2640.0]), 1, self.NORMAL), 1)
+        r = t.mt5.sent[0]
+        self.assertEqual((r["sl"], r["tp"]), (2660.0, 2640.0))                      # SELL: SL 10 USD por encima del bid
+        self.assertEqual(t.outcome[0], "operada")
+        self.assertIn("(automático)", t.outcome[1])
+        self.assertIn("La señal no traía SL: se puso uno automático a 100 pips (10 USD)", t.msgs[-1][1])
+        b = self.trader(default_sl_pips=100.0, dry_run=False)
+        b.open_signal(Signal("BUY", tps=[2660.0]), 1, self.NORMAL)
+        self.assertEqual(b.mt5.sent[0]["sl"], 2640.3)                               # BUY: 10 USD por debajo del ask
+
+    def test_zero_means_signals_without_sl_are_not_traded(self):
+        t = self.trader(default_sl_pips=0.0, dry_run=False)
+        self.assertEqual(t.open_signal(Signal("SELL", tps=[2640.0]), 1, self.NORMAL), 0)
+        self.assertEqual(t.mt5.sent, [])
+        self.assertIn("no trae SL", t.outcome[1])
+
+    def test_a_signal_that_brings_its_sl_is_untouched(self):
+        t = self.trader(default_sl_pips=100.0, dry_run=False)
+        t.open_signal(parse("SELL GOLD 2650 SL 2655 TP1 2640").signal, 1, self.NORMAL)
+        self.assertEqual(t.mt5.sent[0]["sl"], 2655.0)
+        self.assertNotIn("automático", t.outcome[1])
+
+    def test_two_message_channels_use_their_own_emergency_sl_not_the_global_default(self):
+        t = self.trader(default_sl_pips=500.0, dry_run=False)
+        t.open_signal(parse("SELL", True).signal, 1, {**CH, "tp_pips": "30", "emergency_sl_pips": 50})
+        self.assertEqual(t.mt5.sent[0]["sl"], 2655.0)                                # 50 pips (5 USD), no los 500 del global
+
+
+class SimulationIsNeverMistakenForRealTests(unittest.TestCase):
+    def test_dry_run_says_nothing_was_opened_and_marks_the_signal_as_simulated(self):
+        t = make(FakeMT5(bid=2650.0, ask=2650.3), dry_run=True, default_sl_pips=100.0)
+        self.assertEqual(t.open_signal(parse("SELL GOLD 2650 SL 2660 TP 2640").signal, 7, {"num": 1, "title": "IC GOLD"}), 1)
+        self.assertEqual(t.mt5.sent, [])                                            # en simulación no se envía nada a MT5
+        self.assertEqual(t.outcome[0], "simulada")
+        msg = t.msgs[-1][1]
+        self.assertTrue(msg.startswith("🧪 SIMULACIÓN"))
+        self.assertIn("NO se abrió nada en MetaTrader", msg)
+        self.assertIn("Cambiar a modo REAL", msg)
+        self.assertNotIn("✅", msg)                                                  # ya no parece una operación real
+
+    def test_real_mode_is_still_reported_as_operated(self):
+        t = make(FakeMT5(bid=2650.0, ask=2650.3), dry_run=False)
+        t.open_signal(parse("SELL GOLD 2650 SL 2660 TP 2640").signal, 7, {"num": 1, "title": "IC GOLD"})
+        self.assertEqual(t.outcome[0], "operada")
+        self.assertTrue(t.msgs[-1][1].startswith("✅"))
+        self.assertTrue(t.mt5.sent)
+
+
+class BacktestDefaultSlTests(unittest.TestCase):
+    def test_default_sl_applies_in_the_backtest_like_in_the_bot(self):
+        msg = [Msg(1, T0, "SELL GOLD 2650 TP 2640")]                               # sin SL
+        path = flat(2650, 10) + flat(2650, 3) + [(2650, 2661, 2650, 2660)]
+        on = simulate(msg, bars(path), SimConfig(lot=0.01, spread=0, delay=0, max_tps=1, default_sl_pips=100), False)
+        self.assertEqual((on[0].sl, on[0].outcome), (2660.0, "SL"))                  # 100 pips = 10 USD → SL 2660, tocado
+        off = simulate(msg, bars(path), SimConfig(lot=0.01, spread=0, delay=0, max_tps=1, default_sl_pips=0), False)
+        self.assertEqual(off, [])
 
 
 class BacktestTests(unittest.TestCase):

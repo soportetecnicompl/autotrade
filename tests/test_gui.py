@@ -377,6 +377,139 @@ class GuiTests(unittest.TestCase):
         b.chan.set("Canal B  (#9)")
         self.assertTrue(str(b.report_path()).endswith("report_c9.html"))
 
+    # ---- modo del programa EN MARCHA (simulación vs real) y SL automático
+    def fake_running(self, dry_run, config_age=0.0):
+        """Simula un programa en marcha: bot.pid con un proceso vivo + el estado que escribe al arrancar."""
+        import json as _j
+        import time as _t
+        self.app.sync_settings()
+        self.app.save()
+        mtime = (Path(self.tmp.name) / "config.ini").stat().st_mtime
+        (Path(self.tmp.name) / "bot.pid").write_text(str(os.getpid()))
+        (Path(self.tmp.name) / "bot_status.json").write_text(_j.dumps(
+            {"pid": os.getpid(), "dry_run": dry_run, "started_at": _t.time(), "config_mtime": mtime - config_age}))
+
+    def panel(self):
+        self.app.show(self.PANEL)
+        return self.app.steps[self.PANEL]
+
+    def test_panel_says_which_mode_the_running_program_is_really_in(self):
+        a = self.app
+        a.v["dry_run"].set(True)
+        self.fake_running(dry_run=True)
+        p = self.panel()
+        self.assertIn("NO se abren operaciones en MetaTrader", p.mode.cget("text"))
+        self.assertIn("FUNCIONANDO en SIMULACIÓN", p.st.cget("text"))
+        self.assertIn("NO abre nada en MetaTrader", p.st.cget("text"))
+        self.assertIn("Cambiar a modo REAL", p.mode_btn.cget("text"))
+        self.assertTrue(p.restart_btn.instate(["!disabled"]))
+        a.v["dry_run"].set(False)
+        self.fake_running(dry_run=False)
+        p = self.panel(); p.refresh()
+        self.assertIn("MODO REAL", p.mode.cget("text"))
+        self.assertIn("FUNCIONANDO en modo REAL", p.st.cget("text"))
+        self.assertIn("Volver a modo SIMULACIÓN", p.mode_btn.cget("text"))
+
+    def test_panel_warns_when_the_running_program_does_not_match_the_configuration(self):
+        a = self.app
+        a.v["dry_run"].set(False)                                   # configuración: REAL
+        self.fake_running(dry_run=True)                             # pero el programa arrancó en SIMULACIÓN
+        p = self.panel()
+        self.assertIn("sigue en modo SIMULACIÓN", p.st.cget("text"))
+        self.assertIn("la configuración dice REAL", p.st.cget("text"))
+        self.assertIn("Reiniciar", p.st.cget("text"))
+        self.assertIn("MODO SIMULACIÓN", p.mode.cget("text"))       # lo que de verdad está pasando, no lo configurado
+        a.v["dry_run"].set(True)                                    # al revés
+        self.fake_running(dry_run=False)
+        p.refresh()
+        self.assertIn("sigue en modo REAL", p.st.cget("text"))
+
+    def test_panel_warns_when_the_config_changed_after_starting(self):
+        self.app.v["dry_run"].set(True)
+        self.fake_running(dry_run=True, config_age=120)             # el config.ini es 2 min más nuevo que el arranque
+        p = self.panel()
+        self.assertIn("Cambiaste la configuración", p.st.cget("text"))
+
+    def test_stale_status_file_is_ignored_when_nothing_is_running(self):
+        import json as _j
+        self.app.v["dry_run"].set(False)
+        (Path(self.tmp.name) / "bot_status.json").write_text(_j.dumps({"dry_run": True, "config_mtime": 0}))
+        p = self.panel()
+        self.assertIn("Detenido", p.st.cget("text"))
+        self.assertIn("MODO REAL", p.mode.cget("text"))             # sin programa en marcha manda la configuración
+        self.assertTrue(p.restart_btn.instate(["disabled"]))
+
+    def test_switch_to_real_needs_confirmation_and_back_to_simulation_does_not(self):
+        a = self.app
+        a.v["dry_run"].set(True)
+        p = self.panel()
+        self.answer = False
+        p.switch_mode()
+        self.assertTrue(a.settings.dry_run)                         # no confirmó: sigue en simulación
+        self.assertTrue(any(t == "Cambiar a modo REAL" for _, t, _ in self.dialogs))
+        self.answer = True
+        p.switch_mode()
+        self.assertFalse(a.settings.dry_run)
+        self.assertIn("dry_run = false", (Path(self.tmp.name) / "config.ini").read_text(encoding="utf-8"))
+        n = len(self.dialogs)
+        p.switch_mode()                                              # volver a simulación: sin pregunta
+        self.assertTrue(a.settings.dry_run)
+        self.assertEqual(len(self.dialogs), n)
+
+    def test_switching_mode_while_running_offers_to_restart(self):
+        a = self.app
+        a.v["dry_run"].set(True)
+        self.fake_running(dry_run=True)
+        p = self.panel()
+        calls = []
+        p.restart_bot = lambda confirmed=False: calls.append(confirmed)
+        answers = iter([True, False])                                # 1.º: «sí, modo real»; 2.º: «reiniciar ahora»: no
+        import tkinter.messagebox as mb
+        mb.askyesno = lambda t, m, **k: (self.dialogs.append(("askyesno", t, m)), next(answers))[1]
+        p.switch_mode()
+        self.assertFalse(a.settings.dry_run)
+        self.assertEqual(calls, [])                                  # dijo que no: no se reinicia
+        self.assertIn("sigue en modo SIMULACIÓN", p.st.cget("text")) # y el panel se lo recuerda
+        answers = iter([True])                                       # volver a simulación: solo pregunta por el reinicio
+        p.switch_mode()
+        self.assertEqual(calls, [True])
+
+    def test_restart_stops_then_starts_without_touching_this_process(self):
+        self.fake_running(dry_run=True)                              # bot.pid = este mismo proceso: NUNCA llamar al stop real
+        p = self.panel()
+        seen = []
+        p.stop = lambda: seen.append("stop")
+        p.start = lambda confirmed=False: seen.append(("start", confirmed))
+        p.later = lambda ms, fn: fn()
+        p.restart_bot(confirmed=True)
+        self.assertEqual(seen, ["stop", ("start", True)])
+
+    def test_trading_step_explains_the_automatic_sl(self):
+        a = self.app
+        a.show(4)
+        step = a.steps[4]
+        a.v["default_sl_pips"].set("100")
+        self.assertIn("100 pips (10 USD", step.sl_hint.cget("text"))
+        a.v["default_sl_pips"].set("0")
+        self.assertIn("NO se operan", step.sl_hint.cget("text"))
+        a.v["default_sl_pips"].set("abc")
+        self.assertEqual(step.sl_hint.cget("text"), "")
+        a.v["default_sl_pips"].set("-5")
+        a.goto(5)
+        self.assertEqual(a.index, 4)                                  # valor inválido: no deja avanzar
+        self.assertTrue(any("SL automático" in m for _, _, m in self.dialogs))
+        a.v["default_sl_pips"].set("120")
+        a.goto(5)
+        self.assertEqual(a.settings.default_sl_pips, 120.0)
+
+    def test_inbox_labels_simulated_signals(self):
+        from autotrade.eventlog import EventLog
+        EventLog(Path(self.tmp.name) / "signals.jsonl").add(channel=1, title="IC", msg_id=1, status="simulada",
+                                                           detail="1/1 órdenes SELL", text="SELL")
+        p = self.panel()
+        row = p.inbox.item(p.inbox.get_children()[0], "values")
+        self.assertEqual(row[2], "🧪 Simulada")
+
     def test_failed_analysis_clears_the_log_and_shows_the_concrete_reason(self):
         a = self.app
         a.v["api_id"].set("12345678"); a.v["api_hash"].set("a" * 32); a.v["phone"].set("+50499998888")

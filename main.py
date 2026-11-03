@@ -8,15 +8,18 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import json
 import asyncio
 import configparser
 import logging
 import os
 import sys
+import time
 import urllib.request
+from pathlib import Path
 from datetime import datetime, timezone
 
-from autotrade.parser import looks_like_signal, parse
+from autotrade.parser import looks_like_signal, parse, parse_bare_entry
 from autotrade.planner import Skip, plan_orders
 from autotrade.channels import parse_channels
 from autotrade.schedule import TradingSchedule
@@ -73,6 +76,8 @@ def load_config(path: str) -> dict:
         "retry_max_slippage": r.getfloat("retry_max_slippage", 1.0),
         "stops_policy": r.get("stops_policy", "skip").strip().lower(),
         "auto_be": r.getboolean("auto_be", False),
+        "default_sl_pips": r.getfloat("default_sl_pips", 100.0),
+        "_path": path,
         "tz_offset_hours": float(f.get("tz_offset_hours", 0) or 0),
         "daily_loss_limit_pct": float(rk.get("daily_loss_limit_pct", 0) or 0),
         "max_signals_per_day": int(float(rk.get("max_signals_per_day", 0) or 0)),
@@ -140,6 +145,20 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
     trader.control, trader.guard, trader.news = control, guard, news_filter
     inbox = EventLog("signals.jsonl")
     tasks = []
+
+    def write_status():
+        """El panel lee este archivo: así sabe si el programa en marcha está en simulación o en real, y si la
+        configuración cambió después de arrancarlo (los cambios solo se aplican al reiniciar)."""
+        try:
+            mtime = os.path.getmtime(cfg.get("_path", "config.ini"))
+        except OSError:
+            mtime = 0.0
+        try:
+            Path("bot_status.json").write_text(json.dumps(
+                {"pid": os.getpid(), "dry_run": bool(cfg["dry_run"]), "started_at": time.time(),
+                 "config_mtime": mtime}), encoding="utf-8")
+        except OSError:
+            pass
     try:
         trader.connect()
 
@@ -176,6 +195,13 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
             rec = dict(channel=ch["num"], title=ch["title"], msg_id=msg_id, text=text)
             res = parse(text, entry_then_sl=bool(ch.get("entry_then_sl")))
             if not res:
+                if not ch.get("entry_then_sl") and parse_bare_entry(text):
+                    # «SELL» / «BUY» sueltos en un canal que no está en modo «dos mensajes»: no ignorarlos en silencio
+                    hint = ("compra/venta sin SL: si este canal manda la señal en dos mensajes (primero compra/venta y "
+                            "luego el SL), actívalo en el asistente → Canales → «Ajustes avanzados». No se abrió nada.")
+                    inbox.add(status="revisar", detail=hint, **rec)
+                    notifier.notify(f"🔎 {who}El mensaje {msg_id} «{text.strip()[:50]}» es una compra/venta sin SL: {hint}", "warn")
+                    return
                 if looks_like_signal(text):          # parece una señal pero no se entendió: no ignorarla en silencio
                     inbox.add(status="revisar", detail="parece una señal pero no la entendí", **rec)
                     notifier.notify(f"🔎 {who}El mensaje {msg_id} parece una señal pero no lo entendí: "
@@ -294,6 +320,7 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
             prot.append(f"noticias ({cfg['news_mode']})")
         if cfg["auto_be"]:
             prot.append("break-even automático")
+        write_status()
         restarts = int(os.environ.get("AUTOTRADE_RESTARTS", "0") or 0)
         notifier.notify(
             ("🔁 Bot REINICIADO automáticamente (reinicio #%d: se había detenido o el equipo se reinició)\n" % restarts
@@ -301,6 +328,8 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
             + f"Modo: {mode}\nCanales ({len(by_peer)}): {titles}\nMT5: {trader.account_desc}\n"
             f"Símbolo: {cfg['symbol']} | lote total {cfg['lot_size']} | máx. TPs {cfg['max_tps']}\n"
             f"Horario: {'sin restricción' if sched.always else sched.describe()}\n"
+            + ("⚠️ MODO SIMULACIÓN: el programa analiza las señales pero NO abre nada en MetaTrader. "
+               "Para operar de verdad: panel → «Cambiar a modo REAL».\n" if cfg["dry_run"] else "")
             + "Protecciones: " + (", ".join(prot) or "ninguna") + "\n"
             "Control: escribe /ayuda en «Mensajes guardados» para pausar, ver el estado o cerrar todo.", "error")
 
@@ -315,6 +344,10 @@ async def run(cfg: dict, list_dialogs: bool) -> None:
     finally:
         for t in tasks:
             t.cancel()
+        try:
+            Path("bot_status.json").unlink()
+        except OSError:
+            pass
         trader.shutdown()
 
 

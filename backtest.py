@@ -111,6 +111,7 @@ def run(a) -> None:
                     volume_step=a.volume_step,
                     schedule=TradingSchedule.from_text(a.trading_days, a.trading_hours, a.report_tz),
                     entry_then_sl=a.entry_then_sl, emergency_sl_pips=a.emergency_sl_pips,
+                    default_sl_pips=a.default_sl_pips,
                     tp_pips=tuple(parse_pip_list(a.tp_pips)), pip=a.pip_size, late_sl_min=a.late_sl_min)
     if cfg.schedule and not cfg.schedule.always:
         print("Filtro de horario:", cfg.schedule.describe())
@@ -161,6 +162,8 @@ def main() -> None:
     r.add_argument("--entry-then-sl", action="store_true",
                    help="el canal manda primero compra/venta (se abre al instante) y luego el SL")
     r.add_argument("--emergency-sl-pips", type=float, default=100.0, help="SL provisional hasta que llegue el del canal")
+    r.add_argument("--default-sl-pips", type=float, default=100.0,
+                   help="SL automático (pips) cuando la señal no trae SL; 0 = descartar esas señales")
     r.add_argument("--tp-pips", default="", help='TP por defecto en pips si la señal no trae, ej. "30" o "30,60"')
     r.add_argument("--pip-size", type=float, default=0.10, help="USD por pip (oro: 0.10)")
     r.add_argument("--late-sl-min", type=int, default=30, help="minutos tras la entrada en que se acepta el SL")

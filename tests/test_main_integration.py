@@ -203,11 +203,48 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual([(x["action"], x["position"], x["sl"]) for x in self.after_sl], [(6, 41, 2655.0)])
         self.assertEqual([(x["action"], x["sl"]) for x in self.after_pips], [(6, 2652.0)])      # 20 pips = 2 USD sobre 2650
         rows = [(r["channel"], r["msg_id"], r["status"]) for r in self.inbox()]
-        self.assertEqual(rows, [(1, 60, "operada"), (1, 61, "comando"), (1, 62, "comando")])    # el «SELL» del canal normal no aparece
-        self.assertIn("SL del canal 2655", [r["detail"] for r in self.inbox()][1])
+        self.assertEqual(rows, [(2, 50, "revisar"), (1, 60, "operada"), (1, 61, "comando"), (1, 62, "comando")])
+        self.assertIn("dos mensajes", self.inbox()[0]["detail"])                                # el «SELL» del canal normal: avisa, no opera
+        self.assertIn("SL del canal 2655", [r["detail"] for r in self.inbox()][2])
         texts = " ".join(t for _, t in client.sent)
         self.assertIn("SL de EMERGENCIA a 100 pips", texts)
         self.assertIn("SL del canal aplicado", texts)
+
+    def test_signal_without_sl_gets_100_pips_and_a_bare_sell_in_a_normal_channel_is_flagged(self):
+        status_seen = {}
+
+        async def scenario(c):
+            on_msg = self.handler(c, False)
+            status_seen.update(json.loads(Path("bot_status.json").read_text()))   # el programa dice en qué modo corre
+            await on_msg(channel_event(-1001, "SELL GOLD TP 2640", 70))            # sin SL: se le pone uno automático
+            self.opened = [r for r in self.fake.sent if "position" not in r]
+            await on_msg(channel_event(-1001, "SELL", 71))                          # canal normal: «SELL» suelto
+            await asyncio.sleep(0.05)
+        client = self.run_bot(scenario)
+        self.assertEqual(len(self.opened), 1)                                       # una sola orden: 1 TP
+        self.assertEqual((self.opened[0]["sl"], self.opened[0]["tp"]), (2660.0, 2640.0))
+        rows = [(r["msg_id"], r["status"]) for r in self.inbox()]
+        self.assertEqual(rows, [(70, "operada"), (71, "revisar")])
+        self.assertIn("dos mensajes", self.inbox()[1]["detail"])
+        self.assertEqual(len(self.opened), 1)                                       # el «SELL» suelto NO abrió nada
+        self.assertIn("compra/venta sin SL", " ".join(t for _, t in client.sent))
+        self.assertFalse(status_seen["dry_run"])
+        self.assertFalse(Path("bot_status.json").exists())                          # se borra al salir
+
+    def test_simulation_mode_is_explicit_everywhere(self):
+        seen = {}
+
+        async def scenario(c):
+            seen.update(json.loads(Path("bot_status.json").read_text()))
+            await self.handler(c, False)(channel_event(-1001, "SELL GOLD 2650 SL 2660 TP 2640", 80))
+            await asyncio.sleep(0.05)
+        client = self.run_bot(scenario, dry_run=True)
+        self.assertEqual(self.fake.sent, [])                                        # nada llegó a MetaTrader
+        self.assertEqual(self.inbox()[0]["status"], "simulada")
+        texts = [t for _, t in client.sent]
+        self.assertTrue(any("MODO SIMULACIÓN" in t and "NO abre nada en MetaTrader" in t for t in texts))   # aviso de arranque
+        self.assertTrue(any(t.startswith("[DRY-RUN] 🧪 SIMULACIÓN") and "NO se abrió nada" in t for t in texts))
+        self.assertTrue(seen["dry_run"])
 
     def test_daily_limit_blocks_and_housekeeping_keeps_running(self):
         async def scenario(c):

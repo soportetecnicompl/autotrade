@@ -43,6 +43,7 @@ class Settings:
     max_open_positions: int = 6
     enable_commands: bool = True
     stops_policy: str = "skip"
+    default_sl_pips: float = 100.0        # SL automático si la señal no trae (0 = no operar esas señales)
     auto_be: bool = False                 # break-even automático cuando se cumple el TP1
     # Protecciones
     daily_loss_limit_pct: float = 0.0     # 0 = sin límite
@@ -110,6 +111,8 @@ requote_retries = 3
 retry_delay_ms = 200
 retry_max_slippage = 1.0
 stops_policy = {s.stops_policy}
+; Si una señal no trae SL se le pone uno automático a estos pips (1 pip = 0.10 USD en el oro). 0 = no operarlas.
+default_sl_pips = {s.default_sl_pips:g}
 auto_be = {_b(s.auto_be)}
 
 [risk]
@@ -178,7 +181,8 @@ def load_settings(path: os.PathLike) -> Settings:
         "enable_commands": ("trading", "enable_commands"), "stops_policy": ("trading", "stops_policy"),
         "trading_days": ("filters", "trading_days"), "trading_hours": ("filters", "trading_hours"),
         "tz_offset_hours": ("filters", "tz_offset_hours"), "alerts_enabled": ("alerts", "enabled"),
-        "auto_be": ("trading", "auto_be"), "daily_loss_limit_pct": ("risk", "daily_loss_limit_pct"),
+        "auto_be": ("trading", "auto_be"), "default_sl_pips": ("trading", "default_sl_pips"),
+        "daily_loss_limit_pct": ("risk", "daily_loss_limit_pct"),
         "max_signals_per_day": ("risk", "max_signals_per_day"), "close_on_limit": ("risk", "close_on_limit"),
         "max_spread_usd": ("filters", "max_spread_usd"), "news_mode": ("filters", "news_mode"),
         "news_minutes_before": ("filters", "news_minutes_before"), "news_minutes_after": ("filters", "news_minutes_after"),
@@ -259,6 +263,8 @@ def validate_trading(s: Settings) -> List[str]:
         errs.append("El máximo de posiciones abiertas debe ser al menos 1.")
     if s.stops_policy not in ("skip", "adjust"):
         errs.append("Elige qué hacer cuando el SL/TP queda muy cerca del precio.")
+    if not 0 <= s.default_sl_pips <= 5000:
+        errs.append("El SL automático debe estar entre 0 y 5000 pips (0 = no operar señales sin SL).")
     if s.filter_enabled:
         try:
             TradingSchedule.from_text(s.trading_days, s.trading_hours, s.tz_offset_hours)
